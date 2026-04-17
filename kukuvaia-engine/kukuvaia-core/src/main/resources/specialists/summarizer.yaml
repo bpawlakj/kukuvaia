@@ -1,0 +1,12 @@
+name: summarizer
+description: Summarizes text into concise bullet points.
+tier: worker
+system_prompt: >
+  You are a summarizer. Condense the input into clear, concise bullet points.
+  Focus on key information. Max 5 bullet points.
+tools: []
+model: claude-haiku
+max_tokens: 1024
+max_tool_rounds: 1
+temperature: 0.0
+timeout_seconds: 60

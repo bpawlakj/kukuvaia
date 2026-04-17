@@ -1,0 +1,57 @@
+orchestrator:
+  started_phase: phase-8
+  completed_phases: [phase-1, phase-2, phase-5, phase-7, phase-8, phase-14]
+  failed_phases: []
+  auto_fix_attempts:
+    phase-8: 0
+  options:
+    spec_audit_enabled: false
+    skip_test_suite: false
+    e2e_enabled: false
+    user_docs_enabled: false
+    code_review_enabled: true
+    pragmatic_review_enabled: true
+    reality_check_enabled: true
+    production_check_enabled: false
+  created: "2026-04-10T14:00:00Z"
+  updated: "2026-04-10T16:00:00Z"
+  task_path: .maister/tasks/development/2026-04-10-embabel-memory-architecture
+  task_ids: {}
+
+task:
+  title: "Phase 4A: kukuvaia-memory module + DB schema consolidation"
+  description: |
+    Create kukuvaia-memory Gradle module as standalone infrastructure.
+    Consolidate DB schemas (public + kukuvaia_agent → kukuvaia).
+    Migrate memory classes from kukuvaia-core to kukuvaia-memory.
+    V4 Flyway migration with new tables (users, sessions, conversations).
+    7 task groups, ~30 implementation steps.
+  status: completed
+  tags: [architecture, database, module-creation]
+  priority: high
+
+task_context:
+  risk_level: medium
+  clarifications_resolved: true
+  scope_expanded: false
+  architecture_decision: "kukuvaia-memory as standalone infrastructure, single kukuvaia schema"
+  task_characteristics:
+    has_reproducible_defect: false
+    modifies_existing_code: true
+    creates_new_entities: true
+    involves_data_operations: true
+    ui_heavy: false
+  research_reference:
+    path: null
+    research_question: null
+    research_type: null
+    confidence_level: null
+  phase_summaries:
+    research: {summary: null, key_findings: [], recommended_approach: null}
+    codebase_analysis: {key_files: [agent/memory/MemoryRepository.java, agent/memory/PersistentMemoryAdvisor.java, config/ChatClientConfig.java, config/MemoryConfig.java, tools/MemoryTools.java, agents/PingAgent.kt], primary_language: java, summary: "Dual-layer memory architecture functional. 72 Java files in core, 2 Kotlin in agents. Memory code in agent/memory/ package (3 files) + config/MemoryConfig + tools/MemoryTools + tools/PlanningTools."}
+    clarifications: ["Memory as infrastructure (core depends on memory)", "Single schema: kukuvaia", "Extend existing implementation plan with Phase 4"]
+    gap_analysis: {integration_points: [kukuvaia-memory/build.gradle, kukuvaia-core/build.gradle, settings.gradle, application.yaml, V4__consolidate_schema.sql], summary: "New module creation + schema consolidation + code migration. 7 files to create, 5 to modify, 4 to move, 4 to delete."}
+    scope_clarifications: {scope_expanded: false, summary: "Phase 4A only — module + schema. Phases 4B-4E deferred."}
+    ui_mockups: {components_designed: [], summary: null}
+    specification: {summary: "Create kukuvaia-memory module (standalone infrastructure), consolidate DB to single kukuvaia schema, migrate MemoryEntry/MemoryRepository/PersistentMemoryAdvisor/MemoryConfig from core to memory module, create User/Session/Conversation/Plan models, V4 Flyway migration."}
+    architecture_decision: {decision: "kukuvaia-memory standalone, kukuvaia-core depends on it", summary: "Memory is infrastructure. No circular deps. FK constraints in one schema."}

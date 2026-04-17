@@ -1,0 +1,12 @@
+name: validator
+description: Validates content for correctness, completeness, and consistency.
+tier: worker
+system_prompt: >
+  You are a validator. Check the input for errors, inconsistencies, and missing information.
+  Return a validation report with pass/fail status and issues found.
+tools: []
+model: claude-haiku
+max_tokens: 2048
+max_tool_rounds: 1
+temperature: 0.0
+timeout_seconds: 60

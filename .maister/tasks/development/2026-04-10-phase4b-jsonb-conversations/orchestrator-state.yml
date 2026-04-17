@@ -1,0 +1,44 @@
+orchestrator:
+  started_phase: phase-8
+  completed_phases: [phase-1, phase-2, phase-5, phase-7]
+  failed_phases: []
+  auto_fix_attempts:
+    phase-8: 0
+  options:
+    spec_audit_enabled: false
+    skip_test_suite: false
+    e2e_enabled: false
+    user_docs_enabled: false
+    code_review_enabled: true
+    pragmatic_review_enabled: true
+    reality_check_enabled: true
+    production_check_enabled: false
+  created: "2026-04-10T18:00:00Z"
+  updated: "2026-04-10T18:00:00Z"
+  task_path: .maister/tasks/development/2026-04-10-phase4b-jsonb-conversations
+  task_ids: {}
+
+task:
+  title: "Phase 4B: JSONB Conversations + Session Model"
+  description: |
+    Replace Spring AI row-per-message JdbcChatMemoryRepository with custom
+    JsonChatMemoryRepository storing conversations as JSONB per session.
+    Implement session auto-creation on first chat and session-user linkage.
+  status: pending
+  tags: [memory, database, spring-ai]
+  priority: high
+
+task_context:
+  risk_level: medium
+  clarifications_resolved: true
+  scope_expanded: false
+  architecture_decision: "Custom ChatMemoryRepository with JSONB conversations table"
+  task_characteristics:
+    has_reproducible_defect: false
+    modifies_existing_code: true
+    creates_new_entities: true
+    involves_data_operations: true
+    ui_heavy: false
+  phase_summaries:
+    codebase_analysis: {key_files: [memory/config/MemoryModuleConfig.java, memory/repository/SessionRepository.java, memory/model/ConversationSnapshot.java, memory/model/KukuvaiaUser.java, memory/model/KukuvaiaSession.java], primary_language: java, summary: "Phase 4A complete. kukuvaia-memory module exists with models, repos, advisor, config. Currently using Spring AI JdbcChatMemoryRepository."}
+    specification: {summary: "Replace JdbcChatMemoryRepository with JsonChatMemoryRepository. JSONB conversations table (1 row per session). Session auto-creation on first chat. Message serialization/deserialization."}

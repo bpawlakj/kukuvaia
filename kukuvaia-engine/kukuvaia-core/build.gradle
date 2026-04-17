@@ -1,0 +1,51 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Kukuvaia modules
+    api project(':kukuvaia-memory')
+
+    // Spring Boot
+    api 'org.springframework.boot:spring-boot-starter-web'
+    api 'org.springframework.boot:spring-boot-starter-jdbc'
+    api 'org.springframework.boot:spring-boot-starter-webflux'
+    api 'org.springframework.boot:spring-boot-starter-security'
+
+    // Spring AI (OpenAI-compatible — works with SmartGate, Copilot, OpenAI, Claude via proxy)
+    api 'org.springframework.ai:spring-ai-starter-model-openai'
+    api 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
+    api 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
+
+    // MCP Client (connects to external MCP servers like ETSL)
+    api 'org.springframework.ai:spring-ai-starter-mcp-client'
+
+    // Database
+    api 'org.flywaydb:flyway-core'
+    api 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // LuaJ (sandboxed Lua scripting for tools and skills)
+    implementation 'org.luaj:luaj-jse:3.0.1'
+
+    // Dotenv (.env file support for local development)
+    implementation 'me.paulschwarz:spring-dotenv:4.0.0'
+
+    // Jackson
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.assertj:assertj-core'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

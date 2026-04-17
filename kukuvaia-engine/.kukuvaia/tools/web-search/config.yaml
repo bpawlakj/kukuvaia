@@ -1,0 +1,7 @@
+# Brave Search API key (free: https://brave.com/search/api/ → 2000 req/month)
+# Without this key, web_search falls back to DuckDuckGo Instant Answers
+# brave_api_key: "BSAxxxxx"
+
+# Defaults
+max_results_default: 5
+timeout_ms: 10000

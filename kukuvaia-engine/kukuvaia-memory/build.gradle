@@ -1,0 +1,38 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Spring Boot
+    api 'org.springframework.boot:spring-boot-starter-jdbc'
+
+    // Spring AI (ChatMemoryRepository interface)
+    api 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
+
+    // Spring AI (BaseAdvisor, ChatClientRequest/Response for SmartMemoryAdvisor)
+    api 'org.springframework.ai:spring-ai-client-chat'
+
+    // Spring AI (EmbeddingModel interface)
+    api 'org.springframework.ai:spring-ai-model'
+
+    // Local ONNX embedding model from HuggingFace (no external API needed)
+    api 'org.springframework.ai:spring-ai-transformers'
+
+    // Jackson
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.assertj:assertj-core'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

@@ -1,0 +1,60 @@
+# ─── Secrets & credentials ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+credentials.json
+*.pem
+*.key
+**/.kukuvaia/credentials.json
+
+# ─── Java / Gradle (engine) ────────────────────────────────────────
+**/build/
+**/out/
+**/.gradle/
+**/*.class
+**/*.jar
+!gradle/wrapper/*.jar
+**/hs_err_pid*
+**/replay_pid*
+
+# ─── Node.js / Vite (admin) ────────────────────────────────────────
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.local
+
+# ─── Go (CLI) ──────────────────────────────────────────────────────
+kukuvaia-cli/kukuvaia
+kukuvaia-cli/cli-debug.log
+*.test
+*.out
+
+# ─── Logs ──────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── IDE / editors ─────────────────────────────────────────────────
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.iml
+*.swp
+*.swo
+*~
+
+# ─── OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Claude / AI tooling (local-only settings) ─────────────────────
+.claude/settings.local.json
+
+# ─── Misc ──────────────────────────────────────────────────────────
+*.pid
+*.seed
+*.pid.lock

@@ -1,0 +1,3 @@
+rootProject.name = 'kukuvaia-engine'
+
+include 'kukuvaia-core', 'kukuvaia-agents', 'kukuvaia-memory', 'kukuvaia-app'

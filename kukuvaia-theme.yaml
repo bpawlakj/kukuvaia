@@ -1,0 +1,51 @@
+# Kukuvaia Design Tokens
+# Single source of truth for visual identity across CLI (Lipgloss) and web (CSS).
+#
+# CLI:  go generate → internal/tui/styles.go (Lipgloss constants)
+# Web:  build step  → static/theme.css (CSS custom properties)
+#
+# Change colors here → both clients update. Visual consistency guaranteed.
+
+colors:
+  primary: "#00FF41"         # Phosphor green (Matrix) — titles, active elements, links
+  success: "#00FF41"         # Green — pass, completed, success messages
+  error: "#FF4444"           # Red — fail, errors, critical
+  warning: "#FFB800"         # Amber — warnings, caution
+  muted: "#008F11"           # Dark green — secondary text, timestamps, metadata
+  text: "#00FF41"            # Primary text — phosphor green
+  background: "#000000"     # Pure black
+  surface: "#0A0A0A"         # Slightly elevated surface
+  border: "#008F11"          # Dark green border
+
+table:
+  header_bg: "#008F11"       # Table header background — dark green
+  header_fg: "#00FF41"       # Table header text — phosphor green
+  row_alt_bg: "#0A0A0A"      # Alternating row background
+  border_style: "rounded"    # rounded | thick | double | normal
+  border_color: "#008F11"    # Table border color — dark green
+
+panel:
+  border_style: "rounded"    # rounded | thick | double | normal
+  border_color: "#008F11"    # Panel border color — dark green
+  title_color: "#00FF41"     # Panel title text — phosphor green
+  padding: [0, 1]            # [vertical, horizontal] in character units
+
+code:
+  background: "#0A0A0A"      # Code block background — near-black
+  border_color: "#008F11"    # Code block border — dark green
+  text: "#00FF41"            # Code text color — phosphor green
+
+progress:
+  filled_color: "#00FF41"    # Progress bar filled portion — phosphor green
+  empty_color: "#008F11"     # Progress bar empty portion — dark green
+  spinner_color: "#00FF41"   # Spinner animation color — phosphor green
+
+status:
+  pass: "#00FF41"            # Validation pass — phosphor green
+  fail: "#FF4444"            # Validation fail
+  pending: "#FFB800"         # In progress / pending
+  skip: "#008F11"            # Skipped / N/A — dark green
+
+spacing:
+  block_gap: 1               # Vertical gap between output blocks (character lines)
+  section_gap: 2             # Gap before section headers

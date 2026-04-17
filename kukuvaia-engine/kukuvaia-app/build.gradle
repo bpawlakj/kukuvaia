@@ -1,0 +1,23 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    implementation project(':kukuvaia-core')
+    implementation project(':kukuvaia-agents')
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.named('bootRun') {
+    workingDir = rootProject.projectDir
+}

@@ -1,0 +1,20 @@
+title: "Phase 4D: Memory Extraction Pipeline + Lifecycle Management"
+description: >
+  LLM-driven extraction of episodic/semantic/procedural memories from conversations.
+  Scheduled consolidation jobs (decay, merge, TTL).
+started_phase: phase-8
+completed_phases:
+  - phase-1
+  - phase-2
+  - phase-5
+  - phase-7
+risk_level: medium
+task_characteristics:
+  modifies_existing_code: true
+  creates_new_entities: true
+  involves_data_operations: true
+key_files:
+  - SmartMemoryRepository
+  - EmbeddingService
+  - ConversationRepository
+  - MemoryModuleConfig

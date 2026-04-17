@@ -1,0 +1,14 @@
+name: analyst
+description: Analyzes data, finds patterns, provides insights.
+tier: worker
+system_prompt: >
+  You are a data analyst. Analyze the input thoroughly.
+  Return structured findings with key patterns identified.
+tools:
+  - search_content
+  - read_file
+model: claude-haiku
+max_tokens: 2048
+max_tool_rounds: 5
+temperature: 0.1
+timeout_seconds: 120

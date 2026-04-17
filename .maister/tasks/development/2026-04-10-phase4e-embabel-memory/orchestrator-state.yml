@@ -1,0 +1,25 @@
+title: "Phase 4E: Embabel Agent Integration with Memory"
+description: >
+  Create production Embabel agents (ResearchAgent, ValidationAgent) that use
+  kukuvaia-memory for context retrieval and knowledge persistence. Agents
+  retrieve relevant memories before actions and persist new knowledge after
+  completing goals.
+
+started_phase: phase-8
+completed_phases:
+  - phase-1
+  - phase-2
+  - phase-5
+  - phase-7
+
+risk_level: medium
+
+task_characteristics:
+  modifies_existing_code: true
+  creates_new_entities: true
+
+key_files:
+  - PingAgent.kt
+  - SmartMemoryRepository
+  - MemoryRetrievalService
+  - EmbeddingService
