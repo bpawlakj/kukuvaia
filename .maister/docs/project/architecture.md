@@ -71,7 +71,7 @@ kukuvaia-app                 ← depends on all (Boot entry + migrations)
 
 ### Security Layer (`ai.kukuvaia.security`)
 - **Purpose**: Defense-in-depth across all entry points
-- **Key Classes**: ApiAuthFilter (Bearer/JWT), WebhookAuthFilter (HMAC-SHA256), WebhookRateLimiter, ErrorSanitizer, PayloadSanitizer, ToolResultSanitizingAdvisor, CredentialsFileGuard
+- **Key Classes**: ApiAuthFilter (Bearer/JWT), WebhookAuthFilter (HMAC-SHA256), WebhookRateLimiter, ErrorSanitizer, PayloadSanitizer, ToolResultSanitizingAdvisor
 
 ### Provider Routing (`ai.kukuvaia.provider`)
 - **Purpose**: Multi-provider LLM access with runtime switching
@@ -107,8 +107,7 @@ kukuvaia-app                 ← depends on all (Boot entry + migrations)
 | Authorsuite | HTTP REST | Validation API via @McpTool |
 
 ## Configuration
-- **Secrets**: Environment variables (never hardcoded)
-- **Credentials**: `~/.kukuvaia/credentials.json` (chmod 600, validated by CredentialsFileGuard)
+- **Secrets**: Environment variables (never hardcoded) — local dev via `kukuvaia-engine/.env` (auto-loaded by `bootRun`), production via secret manager. OAuth credential storage will be reintroduced when `/login github` is implemented.
 - **Personas**: YAML files in `.kukuvaia/` directory with tool_filter, system prompt, provider restrictions
 - **Design tokens**: `kukuvaia-theme.yaml` (shared between CLI and web)
 

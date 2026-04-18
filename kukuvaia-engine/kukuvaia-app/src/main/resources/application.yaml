@@ -1,6 +1,5 @@
 kukuvaia:
   max-tool-rounds: 20
-  credentials-path: ${user.home}/.kukuvaia/credentials.json
   llm:
     request-timeout: 120
   daemon:

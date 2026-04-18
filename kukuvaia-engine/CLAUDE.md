@@ -11,7 +11,6 @@ Java/Spring Boot + Spring AI agent engine. Multi-module Gradle project handling 
 - Spring AI 1.x — ChatClient, ToolCallAdvisor, MCP, JdbcChatMemory
 - Embabel Agent Framework (agents module — Kotlin, GOAP planning)
 - PostgreSQL — sessions (JdbcChatMemoryRepository) + pipeline data (JDBC)
-- MongoDB driver — outlines, sections, content items (read-only)
 - HTTP client — Authorsuite validation API
 
 ## Multi-Module Structure

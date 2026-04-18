@@ -68,7 +68,7 @@ Build only what is needed, clear purpose for every method, delete exploration ar
 Located in `.maister/docs/standards/security/`
 
 #### Credentials (`standards/security/credentials.md`)
-Credentials file chmod 600 enforcement via CredentialsFileGuard, never hardcode secrets (env vars or secure files only), no credentials in logs/prompts/errors.
+Secrets loaded from env vars only (`.env` in dev, secret manager in prod) — no on-disk credentials file. Never hardcode secrets; never log credentials, tokens, or DSN strings. Future OAuth flows must reintroduce chmod-600 file guard before writing tokens.
 
 #### Authentication (`standards/security/authentication.md`)
 Auth required on all API endpoints (ApiAuthFilter for Bearer/JWT), webhook HMAC-SHA256 validation with constant-time comparison (WebhookAuthFilter).

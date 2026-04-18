@@ -81,44 +81,39 @@ kukuvaia/
 
 Run these four steps once. After that, jump to **Daily Development** below.
 
-### 1. Start PostgreSQL
+### 1. Bootstrap `.env`
+
+The engine reads configuration from environment variables. For local development, keep them in `kukuvaia-engine/.env` — `./gradlew :kukuvaia-app:bootRun` auto-loads it.
 
 ```bash
-docker run -d --name kukuvaia-postgres \
-  -e POSTGRES_USER=kukuvaia \
-  -e POSTGRES_PASSWORD=kukuvaia \
-  -e POSTGRES_DB=kukuvaia \
-  -p 5432:5432 \
-  pgvector/pgvector:pg17
+./scripts/bootstrap.sh
+```
+
+What the script does (idempotent, safe to re-run):
+
+1. Copies `kukuvaia-engine/.env.example` → `kukuvaia-engine/.env` if `.env` does not exist.
+2. Reports whether the Postgres container is running.
+
+Alternative — manual:
+
+```bash
+cp kukuvaia-engine/.env.example kukuvaia-engine/.env
+```
+
+Then open `kukuvaia-engine/.env` and set `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`. The Postgres defaults match the Docker container in step 2 (`PG_PASSWORD=kukuvaia`).
+
+> Skipping `.env` and starting the engine with an empty `PG_PASSWORD` is the #1 cause of `The server requested SCRAM-based authentication, but no password was provided` on first run.
+
+### 2. Start PostgreSQL
+
+```bash
+docker compose -f kukuvaia-engine/docker-compose.yml up -d
 
 # Verify it's up:
 docker exec kukuvaia-postgres psql -U kukuvaia -d kukuvaia -c "SELECT version();"
 ```
 
 Flyway will create the `kukuvaia` schema and run all migrations automatically on the first engine startup.
-
-### 2. Configure credentials
-
-Create `~/.kukuvaia/credentials.json` with file mode `600` (the `CredentialsFileGuard` rejects loose permissions):
-
-```bash
-mkdir -p ~/.kukuvaia
-touch ~/.kukuvaia/credentials.json
-chmod 600 ~/.kukuvaia/credentials.json
-```
-
-Populate it with the provider you plan to use. Example for generic OpenAI-compatible:
-
-```json
-{
-  "openai": {
-    "apiKey": "sk-your-key-here",
-    "baseUrl": "https://api.openai.com"
-  }
-}
-```
-
-For GitHub Copilot, run `/login github` from the CLI after startup — it handles the OAuth device flow and persists tokens here.
 
 ### 3. Build the engine
 
@@ -148,9 +143,9 @@ npm install
 
 ```bash
 # Terminal 1 — PostgreSQL
-docker start kukuvaia-postgres
+docker compose -f kukuvaia-engine/docker-compose.yml up -d
 
-# Terminal 2 — engine (port 8080)
+# Terminal 2 — engine (port 8080); kukuvaia-engine/.env is auto-loaded
 cd kukuvaia-engine
 ./gradlew :kukuvaia-app:bootRun
 
@@ -174,7 +169,7 @@ docker stop kukuvaia-postgres
 
 ## Environment Variables
 
-The engine reads these at startup. All have sensible defaults for local development.
+The engine reads these at startup. For local development, put them in `kukuvaia-engine/.env` — `./gradlew :kukuvaia-app:bootRun` loads every `KEY=VALUE` line automatically (shell exports take precedence over the file). Run `./scripts/bootstrap.sh` to seed `.env` from `.env.example`. CLI variables (`KUKUVAIA_SERVER_URL`, `KUKUVAIA_PERSONA`, `KUKUVAIA_SESSION`) are consumed by the Go binary — export them from your shell, not from `.env`.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -240,11 +235,11 @@ npm run build                           # tsc + vite build
 
 ## Troubleshooting
 
+**`The server requested SCRAM-based authentication, but no password was provided`** — you skipped step 1 of First-time Setup. Run `./scripts/bootstrap.sh` (creates `.env` with `PG_PASSWORD=kukuvaia` matching the Docker container) and restart `./gradlew :kukuvaia-app:bootRun`.
+
 **`FATAL: role "kukuvaia" does not exist`** — the container was created with different `POSTGRES_USER`. Remove and recreate (`docker rm -f kukuvaia-postgres`) with the env vars above.
 
 **Flyway fails with `extension "vector" is not available`** — you used plain `postgres:17` instead of `pgvector/pgvector:pg17`. Recreate the container.
-
-**`Credentials file has insecure permissions`** — `chmod 600 ~/.kukuvaia/credentials.json`.
 
 **`403` on `/api/*`** — either enable dev mode (`KUKUVAIA_SECURITY_DEV_MODE=true`, default) or provide a valid Bearer token per the auth scheme.
 

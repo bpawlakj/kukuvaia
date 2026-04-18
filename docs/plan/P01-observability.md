@@ -919,3 +919,200 @@ No separate endpoint — existing `/api/chat` SSE stream carries these alongside
 - The only constructor signature changes are adding `MeterRegistry`, which requires updating existing tests (inject `SimpleMeterRegistry`). This is mechanical.
 - AOP for tool timing (Step 7) requires `spring-boot-starter-aop`; verify no conflicts with existing component scanning.
 - OTel `compileOnly` dependencies are safe: `Span.current()` and `Context.current()` return no-op implementations when the OTel agent is not present.
+
+---
+
+## Langfuse Integration — LLM-Specific Observability UI (2026-04-17)
+
+**Rationale**: P01 Steps 1-10 + Enhancements A/B give us infrastructure-grade observability (JVM, HTTP, JDBC, latency histograms, Prometheus metrics) plus distributed traces exported to Jaeger / Grafana Tempo. This is sufficient for **operators** debugging "why is this endpoint slow?" — but it is **not optimal for prompt engineers** debugging "why did the LLM produce this bad answer?".
+
+Jaeger/Tempo UIs were designed for microservice request flows. They show spans as timeline bars, not as prompt/response pairs. Looking at a failed answer requires:
+1. Find the trace ID
+2. Open Jaeger
+3. Click through the span tree
+4. Copy-paste prompt payloads from attribute fields
+5. Manually compare across sessions
+
+[Langfuse](https://langfuse.com) (open source, MIT, self-hostable) is purpose-built for LLM ops:
+- Prompt/response UI with diff view across runs
+- Per-trace cost computation (tokens × model pricing)
+- User feedback annotations (thumb-up/down, free text) tied to traces
+- Dataset management with UI-driven curation (feeds into P05 eval pipeline)
+- A/B testing of prompts with statistical significance
+- Ingests **standard OTel OTLP** — zero custom instrumentation needed
+
+Since P01 already emits OTel spans with `kukuvaia.*` attributes, Langfuse integration is **one environment variable away**: add it as a second OTLP exporter alongside Jaeger/Tempo.
+
+### Langfuse Step A: Run Langfuse locally (self-hosted)
+
+**`kukuvaia-engine/docker-compose.yml` — add services:**
+
+```yaml
+services:
+  langfuse-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+
+  langfuse:
+    image: langfuse/langfuse:latest
+    depends_on: [langfuse-db]
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: change-me-in-prod
+      SALT: change-me-in-prod
+      TELEMETRY_ENABLED: "false"
+
+volumes:
+  langfuse-db-data:
+```
+
+Visit `http://localhost:3000`, create a project, copy the public+secret key pair.
+
+### Langfuse Step B: Configure OTel exporter to dual-send
+
+Langfuse accepts OTLP traces at `POST /api/public/otel/v1/traces` with basic auth (public key : secret key base64-encoded).
+
+**Environment variables for startup:**
+
+```bash
+# Existing OTel exporter (Jaeger/Tempo) — unchanged
+OTEL_SERVICE_NAME=kukuvaia-engine
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# Second exporter for Langfuse (HTTP/protobuf)
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://cloud.langfuse.com/api/public/otel/v1/traces
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Basic <base64(pk:sk)>
+```
+
+For **dual export** (both Jaeger AND Langfuse), use the OTel Collector as a fan-out:
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc: { endpoint: 0.0.0.0:4317 }
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls: { insecure: true }
+  otlphttp/langfuse:
+    endpoint: https://cloud.langfuse.com/api/public/otel
+    headers:
+      Authorization: Basic <base64(pk:sk)>
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlp/jaeger, otlphttp/langfuse]
+```
+
+Engine exports once to Collector on `:4317`; Collector fans out. Zero duplicated network I/O from the JVM.
+
+### Langfuse Step C: Span attribute conventions for optimal Langfuse UI
+
+Langfuse maps specific OTel attribute names to first-class UI concepts. Update emission sites to include these:
+
+| Langfuse concept | OTel attribute | Emit in |
+|------------------|----------------|---------|
+| Input prompt | `gen_ai.prompt` (JSON) | `ProviderAuditLog.before()` |
+| Output response | `gen_ai.completion` (JSON) | `ProviderAuditLog.after()` |
+| Model | `gen_ai.request.model` | `ProviderAuditLog.before()` |
+| Provider | `gen_ai.system` | `ProviderAuditLog.before()` |
+| Prompt tokens | `gen_ai.usage.prompt_tokens` | `ProviderAuditLog.after()` |
+| Completion tokens | `gen_ai.usage.completion_tokens` | `ProviderAuditLog.after()` |
+| User ID | `user.id` | `AgentService.streamChat` |
+| Session ID | `session.id` | `AgentService.streamChat` |
+
+These follow the [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — same attributes also recognized by Grafana Tempo's LLM view, so no vendor lock-in.
+
+**Change in `ProviderAuditLog.before()`** (extends Enhancement A):
+
+```java
+Span currentSpan = Span.current();
+currentSpan.setAttribute("gen_ai.system", provider);
+currentSpan.setAttribute("gen_ai.request.model", model);
+currentSpan.setAttribute("gen_ai.prompt", serializePrompt(request.prompt().getInstructions()));
+currentSpan.setAttribute("session.id", sessionId);
+currentSpan.setAttribute("user.id", userId);
+```
+
+**Change in `ProviderAuditLog.after()`:**
+
+```java
+currentSpan.setAttribute("gen_ai.completion", response.chatResponse().getResult().getOutput().getContent());
+currentSpan.setAttribute("gen_ai.usage.prompt_tokens", usage.getPromptTokens());
+currentSpan.setAttribute("gen_ai.usage.completion_tokens", usage.getCompletionTokens());
+```
+
+**PII note**: `gen_ai.prompt` and `gen_ai.completion` carry full message bodies. For production: gate emission behind `kukuvaia.observability.langfuse.include-payloads: true` config flag (default `false` if dealing with user PII). Truncate to 4000 chars. Reuse `ErrorSanitizer` (per security/runtime standard) for payload scrubbing.
+
+### Langfuse Step D: Dataset feedback loop with P05
+
+Langfuse's "Datasets" feature stores curated prompt/expected-output pairs. P05 eval pipeline can read these via Langfuse Java SDK (`io.langfuse:langfuse-java`) as an alternative source to JSONL files:
+
+```java
+// kukuvaia-core/src/main/java/ai/kukuvaia/eval/dataset/LangfuseDatasetLoader.java
+public List<EvalCase> load(String datasetName) {
+    return langfuseClient.datasets().get(datasetName).items().stream()
+        .map(item -> new EvalCase(
+            item.id(),
+            (String) item.metadata().get("category"),
+            List.of(),
+            item.input(),
+            item.expectedOutput(),
+            Map.of()))
+        .toList();
+}
+```
+
+Prompt engineers curate in Langfuse UI; CI runs evals against the same dataset. Round-trip closed.
+
+### Langfuse acceptance criteria
+
+- [ ] Langfuse runs locally via `docker-compose up langfuse langfuse-db`
+- [ ] OTel Collector fans out to Jaeger AND Langfuse; single failure of either sink does not affect the other
+- [ ] `ProviderAuditLog` sets `gen_ai.*` attributes following OTel GenAI semantic conventions
+- [ ] `session.id` and `user.id` attributes populated on root chat span
+- [ ] PII-sensitive payload fields (`gen_ai.prompt`/`gen_ai.completion`) behind config flag, disabled by default in prod profile
+- [ ] Payload sanitization reuses `ErrorSanitizer` before emission
+- [ ] Langfuse UI shows chat sessions grouped by `session.id`, with cost per trace
+- [ ] `LangfuseDatasetLoader` integrates with P05 `OfflineEvalRunner` (optional, Phase 2)
+
+### Langfuse effort estimate
+
+| Task | Effort |
+|------|--------|
+| docker-compose Langfuse stack | ~0.5h |
+| OTel Collector fan-out config | ~0.5h |
+| `gen_ai.*` attributes in `ProviderAuditLog` | ~1h |
+| PII gate + payload sanitization | ~1h |
+| `LangfuseDatasetLoader` (optional, defer to P05) | ~1.5h |
+| **Langfuse total** | **~4.5h** (3h without SDK integration) |
+
+**Grand total P01 with Langfuse**: **~19h** (or ~17.5h deferring dataset integration to P05).
+
+### Langfuse vs Jaeger/Tempo — when to use which
+
+| Use case | Tool |
+|---|---|
+| "Why is endpoint X slow?" | Jaeger / Grafana Tempo |
+| "Why did the LLM produce this answer?" | Langfuse |
+| JVM heap, HikariCP, HTTP latency | Prometheus + Grafana |
+| Cost per user, cost per session | Langfuse |
+| Distributed trace across services | Jaeger / Tempo |
+| Prompt A/B test statistical significance | Langfuse |
+
+Not "either/or" — both run in parallel, consuming the same OTel stream. Ops team lives in Grafana; prompt engineers live in Langfuse.

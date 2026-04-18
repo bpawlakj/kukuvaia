@@ -20,4 +20,27 @@ tasks.named('test') {
 
 tasks.named('bootRun') {
     workingDir = rootProject.projectDir
+
+    // Auto-load `.env` from the engine root (kukuvaia-engine/.env).
+    // Each KEY=VALUE line becomes an environment variable for the forked JVM,
+    // unless the variable is already set in the parent shell (shell wins).
+    // Comments (# ...) and blank lines are ignored. No expansion or quoting —
+    // if you need that, export from the shell or use a profile-based setup.
+    def envFile = rootProject.file('.env')
+    if (envFile.exists()) {
+        envFile.eachLine { rawLine ->
+            def line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith('#')) return
+            def eq = line.indexOf('=')
+            if (eq <= 0) return
+            def key = line.substring(0, eq).trim()
+            def value = line.substring(eq + 1).trim()
+            if (System.getenv(key) == null) {
+                environment key, value
+            }
+        }
+        logger.lifecycle("bootRun: loaded env vars from ${envFile}")
+    } else {
+        logger.lifecycle("bootRun: no .env found at ${envFile} — run ../scripts/bootstrap.sh or 'cp .env.example .env'")
+    }
 }

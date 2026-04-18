@@ -77,7 +77,7 @@ See updated `docs/plan/P04-conversation-summarization.md` for details.
 | ReAct strategy | Spring AI ToolCallAdvisor already implements reason-act loop |
 | Ktor plugin | kukuvaia uses Spring Boot |
 | A2A Protocol | Not needed at current scale |
-| Langfuse/W&B exporters | Standard OTel exporters sufficient (Jaeger, Grafana Tempo) |
+| Koog's built-in Langfuse/W&B exporters | Not needed as Koog-specific plugins — kukuvaia uses standard OTel OTLP which both Langfuse and Grafana Tempo ingest natively. Langfuse **is** adopted as a complementary backend (see P01 "Langfuse Integration" section) for LLM-specific prompt/response UI alongside Jaeger/Tempo for infra traces. |
 
 ## References
 
