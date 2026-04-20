@@ -1,6 +1,6 @@
 # P22 — MCP Integration with sl-content (Teacher-Assistant Corpus Bridge)
 
-**Status:** Draft — ready to implement pending 4 design decisions (§"Open questions").
+**Status:** In progress — Phases A + B shipped (DB-backed rewrite). Phases C–G pending.
 **Created:** 2026-04-20
 **Depends on:**
 - Kukuvaia: `spring-ai-starter-mcp-client` already on classpath (✅). `ToolResultSanitizingAdvisor` (✅).
@@ -8,6 +8,18 @@
 - Network reachability between the two systems (local Docker Compose or VPC/shared network in cloud).
 
 **Scope:** Make sl-content's retrieval pipeline available to kukuvaia through the Model Context Protocol. Kukuvaia becomes a thin consumer — it doesn't re-implement book/didactics RAG, it calls sl-content's tools. Same principle as P15 Pillar 4 (expert marketplace): domain-specific knowledge lives close to the domain, kukuvaia orchestrates.
+
+## Implementation log (condensed)
+
+| Phase | Status | Commit-ready summary |
+|---|---|---|
+| A — Remote MCP server | **Shipped** in `sl-content-engine` (not in `teacher-assistant` — corpus-level surface, not product-level). HTTP/SSE under `/mcp`, API-key + tenant middleware, per-tenant rate limit, opt-in via `MCP_HTTP_ENABLED`. Reuses existing 9 tools registered in `mcp_tools.py`. |
+| B — Kukuvaia MCP client | **Shipped, DB-backed**. Connection registry moved from YAML to `kukuvaia.mcp_connections` table (V17). `DbMcpSseClientConnectionDetails` overrides Spring AI autoconfig; `PerConnectionHeaderCustomizer` resolves `env:VAR_NAME` refs at request time. Admin CRUD exposed via `/api/admin/mcp/connections`. |
+| C — Agent integration & persona wiring | **Pending** — requires a generic persona `toolAllowList` + session-params primitives (see revised §"Phase C" below). The domain-specific pieces (`teacher` persona, `/select-content` command, education-specific fields) ship as user-authored `.kukuvaia/` extensions, not engine code. |
+| D — Provenance + sanitisation | Pending (blocked on P15 Pillar 1 for full provenance; sanitisation path exists). |
+| E — Caching + rate limits | Pending on kukuvaia side; server-side rate limit shipped in Phase A. |
+| F — Observability polish | Pending. |
+| G — Teacher persona E2E demo | Pending — depends on Phase C generic primitives + user-authored `.kukuvaia/personas/teacher.yaml` example in `docs/`. |
 
 ## Problem
 
@@ -210,66 +222,168 @@ Tool arguments carry user-scoped filters (`country`, `subject`, `grade`). Sl-con
 
 ## Phased rollout
 
-### Phase A — SL-content MCP server (1.5 days traditional / ~2h AI-paired)
+### Phase A — SL-content MCP server (shipped)
 
-Location: new `sl-content/teacher-assistant/backend/src/mcp_server/` module inside the existing FastAPI app. Reuses retrieval services directly — no code duplication.
+**Final location change:** originally drafted to sit inside the
+`teacher-assistant` backend (FastAPI); shipped instead in
+`sl-content-engine` which is the actual corpus + classification platform
+(teacher-assistant is one downstream consumer). This also aligns with
+the product positioning — MCP surface belongs with the corpus, not
+with a specific product skin.
 
-Deliverables:
-- `pyproject.toml` dependency `mcp >= 1.0` (Python SDK).
-- `src/mcp_server/tools.py` — implementations wrapping `src/llm/retrieval/*`.
-- `src/mcp_server/server.py` — MCP server using `mcp.server.fastapi` integration.
-- Mount on existing FastAPI: `POST /mcp` with SSE response.
-- `src/mcp_server/auth.py` — API-key middleware with rate limit.
-- Unit tests: each tool returns expected structure for a golden query.
-- Integration test: start FastAPI, hit `/mcp` with `tools/list`, assert 5 tools.
+**Delivered:**
 
-### Phase B — Kukuvaia MCP client (0.5 day / 30 min AI-paired)
+- Config fields in `sl_content_agent.config.Settings` —
+  `MCP_HTTP_ENABLED` (default false), `MCP_HTTP_API_KEYS`
+  (`tenant:secret,...`), `MCP_HTTP_RATE_LIMIT_PER_MINUTE` (default 100),
+  `MCP_HTTP_RESPONSE_MAX_CHARS` (reserved for future per-tool truncation).
+- `sl_content_agent/mcp_auth.py` — `parse_api_keys()` format parser,
+  `SlidingWindowRateLimiter` (per-tenant, 60 s window, O(1) hot path),
+  `APIKeyMiddleware` (ASGI) with `hmac.compare_digest` verification,
+  fail-closed on empty key set.
+- `sl_content_agent/mcp_http.py` — `build_mcp_routes()` returns Starlette
+  `Route /sse` + `Mount /messages/` using the MCP SDK's
+  `SseServerTransport`; `create_mcp_subapp()` wraps with
+  `APIKeyMiddleware`; `create_query_encoder()` warm-loads BGE-M3 with a
+  graceful fallback if the embedder is missing.
+- Integration in existing `src/sl_content_agent/api/app.py` lifespan:
+  gated by `MCP_HTTP_ENABLED`, mounts the sub-app at `/mcp`, reuses the
+  dashboard API's asyncpg pool + motor client + `register_vector`.
+- Reuses existing `register_tools` from `mcp_tools.py` — 9 tools
+  discovered by kukuvaia (matches expectations): `search`, `search_text`,
+  `get_item`, `find_similar`, `list_outlines`, `get_outline`,
+  `search_outlines`, `list_ccl_books`, `get_counts`.
+- Tests: 19 unit (`test_mcp_auth.py` — key parsing edge cases, rate-
+  limiter tenant isolation, constant-time verify, empty-key-set rejects)
+  + 5 integration (`test_mcp_http_integration.py` via
+  `StarletteTestClient` — 401 on missing/wrong key, 401 on tenant
+  mismatch, 429 after threshold, tenant-isolated limits).
 
-Already have `spring-ai-starter-mcp-client`. Configure connection in `application.yaml`:
+**Opt-in deployment:**
 
-```yaml
-spring:
-  ai:
-    mcp:
-      client:
-        sse:
-          connections:
-            sl-content:
-              url: ${SL_CONTENT_MCP_URL:http://localhost:8000/mcp}
-              sse-endpoint: /sse
-              request-timeout: 30s
-              custom-headers:
-                X-API-Key: ${SL_CONTENT_MCP_KEY}
-                X-Tenant: kukuvaia
+```bash
+# .env
+MCP_HTTP_ENABLED=true
+MCP_HTTP_API_KEYS=kukuvaia:$(openssl rand -hex 32)
+# Then
+uv run sl-api
 ```
 
-Tool discovery is automatic — Spring AI MCP client calls `tools/list` at startup and registers each as a `ToolCallback`. They appear in the same callback list that `ToolCallAdvisor` iterates over, side-by-side with `@Tool`-annotated Java methods.
+### Phase B — Kukuvaia MCP client (shipped, DB-backed)
 
-Acceptance: start kukuvaia with sl-content running, check `/actuator/beans` — MCP tools show up. Log at `INFO` level on startup: `MCP client: discovered 5 tools from sl-content`.
+**Major rewrite during implementation:** originally drafted as YAML-only
+config under `spring.ai.mcp.client.sse.connections.*` with per-connection
+custom headers. Final shipped form is **DB-backed** so the admin
+dashboard can add, rotate and disable remote MCP servers without a
+redeploy.
 
-### Phase C — Agent integration & persona wiring (1 day / 50 min AI-paired)
+**Driver:** Spring AI 1.1.0's `SseParameters` record is `(url, sseEndpoint)`
+only — no headers field. Combined with the user's preference for
+generic-platform behaviour (no hardcoded server names, no per-server env
+var prefixes) and the updated credentials standard (secrets from env
+only, not files), the registry landed in Postgres with header values
+using an `env:VAR_NAME` convention for rotation.
 
-Two UX questions to answer:
+**Delivered:**
 
-1. **When should the agent reach for these tools?** — Two options:
-   - (a) Always expose — rely on tool descriptions + LLM judgement. Simpler. May over-call on trivial chats.
-   - (b) Persona-gated — new `teacher` / `student` / `editorial` personas that include the MCP tools; other personas don't see them. Cleaner, matches TA's `AssistantType` model.
+- **V17 migration** — `kukuvaia.mcp_connections` (`id`, `name` UNIQUE,
+  `url`, `sse_endpoint`, `headers` JSONB, `enabled`, `description`,
+  timestamps).
+- `McpConnection` record + `McpConnectionsRepository` (CRUD, upsert via
+  admin API).
+- `McpConnectionsCache` — startup snapshot of enabled rows, thread-safe,
+  `refresh()` on admin writes, URL-prefix lookup for per-request header
+  dispatch.
+- `DbMcpSseClientConnectionDetails` — implements Spring AI's
+  `McpSseClientConnectionDetails` hook; autoconfig picks this up
+  instead of its properties-backed default, so the YAML
+  `spring.ai.mcp.client.sse.connections.*` block is intentionally
+  **absent** from `application.yaml`.
+- `McpClientConfig` — provides the connection-details bean plus a
+  `McpSyncHttpClientRequestCustomizer` that resolves `env:VAR_NAME`
+  header values via `System.getenv` at request time. Missing env vars
+  drop the header with a warning (no crash).
+- `McpConnectionsController` — `GET|POST|PUT|DELETE /api/admin/mcp/connections`
+  + `POST /api/admin/mcp/connections/refresh` for cache refresh.
+- Admin dashboard integration point — React scaffold can CRUD via REST;
+  UI work tracked separately.
+- Master toggle `KUKUVAIA_MCP_CLIENT_ENABLED` (default `false`) — zero-risk
+  when no remote MCP is wanted.
+- Tests: 14 unit + integration (`McpClientConfigTest` 6 cases covering
+  matched/unmatched URIs, env resolution, blank values, edge cases;
+  `McpConnectionsCacheTest` 6 cases covering load, longest-prefix
+  matching, startup-failure-safe, connection-details mapping).
 
-   **Proposed:** (b) — ship a `teacher` persona YAML in `.kukuvaia/personas/teacher.yaml` that pulls in the MCP tools. Default persona stays local-tools-only.
+**Known limitations** — documented, tracked for a follow-up plan:
 
-2. **Where does `country` / `subject` come from?** — Three options:
-   - User asks per-turn ("for PL grade 7 math, find...").
-   - Session-level selection via `/select-content country=PL subject=math grade=7` slash command (stored in session state).
-   - Profile-level default in `.kukuvaia/personas/teacher.yaml`.
+- Spring AI wires `McpSyncClient` beans once at application startup from
+  the connection-details snapshot. **Adding a new connection requires a
+  restart** for Spring to open a session; header changes on existing
+  connections take effect immediately after `cache.refresh()`. A hot-
+  reload worker that registers/de-registers McpSyncClient beans on
+  demand is a future enhancement.
+- In-memory cache is per-instance. Multi-replica deployments relying
+  on real-time cache consistency would need either pub/sub or a short
+  TTL on startup reload.
+- Admin endpoints are currently unauthenticated — the existing
+  `ApiAuthFilter` covers other `/api/*` routes and must be applied to
+  `/api/admin/*` before exposing this to non-trusted networks.
 
-   **Proposed:** combined — profile sets defaults, slash command overrides per session, per-turn phrase always wins. Explicit `SelectedContentService` extracts and stores these, `SessionContextAdvisor` surfaces them to the system prompt.
+**Startup trace on a populated DB:**
 
-Deliverables:
-- `persons/teacher.yaml` template + loader support.
-- `SelectedContentService` (new, Java) — per-session `(country, subject, grade)` state with transient override.
-- `/select-content` slash command (`SelectContentCommand implements SlashCommand`).
-- System prompt injection in `PersonaService` — when `teacher` persona active, include a line like "The user is teaching in {country}, subject {subject}, grade {grade}. Use MCP retrieval tools when relevant."
-- Tests: agent with `teacher` persona calls `retrieve_books` on a relevant query; default persona does not.
+```
+MCP connections cache refreshed — 1 enabled connections
+MCP connection details: 1 connections resolved from DB — [sl-content]
+MCP: client 'sl-content' connected — 9 tools discovered
+```
+
+### Phase C — Agent integration & generic extension primitives (revised)
+
+**Direction change after user feedback:** kukuvaia engine must stay
+generic — no hardcoded domain names (`teacher`, `country`, `subject`,
+`grade`, `/select-content`, `retrieve_books`). Domain personas and
+commands are user-authored `.kukuvaia/` extensions. The engine only
+provides the generic machinery that makes those extensions effective.
+
+**Engine deliverables (generic, kukuvaia-side):**
+
+1. `PersonaSpec.toolAllowList: List<String>` — optional list of tool
+   names a persona can call. `null`/empty means "all". Applied at
+   ChatClient build time by filtering the `ToolCallback` list against
+   the allow-list. Works identically for local `@Tool` methods and
+   MCP-discovered tools.
+2. `SessionParamsService` — per-session `Map<String, String>` store.
+   `set(sessionId, key, value)`, `unset`, `getAll`. No domain knowledge —
+   keys are user-defined strings.
+3. `UserCommandLoader` new YAML type `set-params` — user commands like
+   `/select-content country=PL subject=math grade=7` parse arg strings
+   into params dict and call `SessionParamsService`. Engine never
+   mentions "select-content" or any domain field.
+4. `SessionContextAdvisor` extension — when the session has non-empty
+   params, inject a neutral block:
+   ```
+   ## Session parameters
+   - country: PL
+   - subject: math
+   - grade: 7
+   ```
+   Agent uses these as it sees fit; engine doesn't prescribe meaning.
+5. Tests: persona allow-list filters tools; `set-params` command writes
+   and clears params; `SessionContextAdvisor` injects params block.
+
+**User-authored extensions (NOT engine code — ship as examples in
+`docs/examples/`):**
+
+- `.kukuvaia/personas/teacher.yaml` — declares
+  `toolAllowList: [search, search_text, get_item, memory_search]`,
+  systemPrompt wskazuje agentowi żeby respektował session parametry
+  country/subject/grade i używał `search`.
+- `.kukuvaia/commands/select-content.yaml` — `type: set-params`, mapuje
+  pozycyjne argi na klucze country/subject/grade.
+
+**Same pattern reusable for any domain:** `lawyer.yaml` +
+`/set-jurisdiction` for legal work, `medical.yaml` + `/set-specialty`
+for medical consults. Engine unchanged.
 
 ### Phase D — Provenance + sanitisation (0.5 day / 30 min AI-paired)
 

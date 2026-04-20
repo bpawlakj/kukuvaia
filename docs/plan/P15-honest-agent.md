@@ -200,6 +200,255 @@ max_tokens: 4096
 
 ---
 
+## Pillar 5 — Post-Execution VerificationEngine
+
+Cross-referenced from `/tmp/villani-code` research (2026-04-20). Villani's core insight — and the reason Qwen 27B outperforms Claude Code on their benchmark — is that **the model that proposes an action cannot also be the authority that confirms it succeeded**. Pillar 2 (RED_TEAM) already covers plan drafting. This pillar covers the other, larger surface area: **every turn where the agent takes an action with side effects** (tool call, patch, bash, database write).
+
+Kukuvaia today lets the LLM self-report success — "I updated the file", "the test passes" — and the supervisor continues on that basis. Pillar 5 interposes a detached verifier between action and acknowledgement.
+
+### Mechanism
+
+New `VerificationEngine` service + `@Tool("verify_action")`:
+
+```java
+public record VerificationResult(
+        Status status,                 // PASS | FAIL | UNCERTAIN | REPAIRED
+        double confidence,             // 0.0 - 1.0
+        List<Finding> findings,
+        String fingerprint             // hash over finding categories + refs
+) {}
+
+public record Finding(
+        FindingCategory category,
+        Severity severity,             // HIGH | MEDIUM | LOW
+        String description,
+        String evidenceRef             // pointer to tool output / shell log / diff
+) {}
+
+public sealed interface FindingCategory {
+    record Regression() implements FindingCategory {}            // tests that passed now fail
+    record IncompleteEdit() implements FindingCategory {}        // target file not modified though claimed
+    record BrokenReference() implements FindingCategory {}       // symbol/path referenced but missing
+    record StaleDoc() implements FindingCategory {}              // TODO/FIXME/outdated comment remains
+    record InconsistentNaming() implements FindingCategory {}    // mixed conventions in the patch
+    record HiddenSideEffect() implements FindingCategory {}      // files changed outside declared scope
+    record FailedAssumption() implements FindingCategory {}      // expected state differs from actual
+    record TestGap() implements FindingCategory {}               // new code path without test
+    record SuspiciousBreadth() implements FindingCategory {}     // > N files changed in one action
+}
+```
+
+### Confidence scoring
+
+Villani's algorithm, adapted:
+
+| Signal | Adjustment |
+|---|---|
+| Start | 0.9 |
+| HIGH-severity finding | −0.18 each |
+| MEDIUM-severity finding | −0.10 each |
+| LOW-severity finding | −0.05 each |
+| Command/test failure observed in evidence | −0.12 each |
+| `SuspiciousBreadth` (>8 files) | −0.06 |
+| No evidence collected (nothing verifiable) | −0.08 |
+| Repeated fingerprint (same findings as previous turn) | −0.03 |
+
+Final status:
+- `PASS` — no findings.
+- `FAIL` — any HIGH-severity finding.
+- `UNCERTAIN` — only MEDIUM/LOW.
+- `REPAIRED` — previous turn was `FAIL`, this turn resolves the finding fingerprint.
+
+### Fingerprinting and loop detection
+
+`fingerprint = sha256(sorted(finding.category + finding.evidenceRef))`. If the same fingerprint appears 3 turns in a row, the advisor emits a structured `stuck` signal — consumed by the UI (warn the user) and by P14 `ContextPressureAdvisor` (consider escalating to a larger model or raising verbosity).
+
+This closes a class of failure mode common with smaller models: "I fixed it" → next turn "I fixed it" → next turn "I fixed it" — all three turns producing identical failing state.
+
+### Trigger points (where the advisor fires)
+
+Unlike Pillar 2 which only fires inside `/plan`, Pillar 5 fires in normal chat whenever an action has observable side effects. The advisor chain watches `ToolCallAdvisor` results and, for tools tagged `hasSideEffect`, runs verification before returning the turn:
+
+| Tool category | Verifier runs | Evidence collected |
+|---|---|---|
+| Patch / write_file | Always | Diff before/after, git status, referenced symbols still resolve |
+| Bash / command execution | When exit code ≠ 0 or output contains error tokens | Stdout/stderr, exit code, subsequent git status |
+| DB write (`@McpTool` marked mutating) | Always | Pre/post row count, returning clause |
+| Memory write | Never (not verifiable post-hoc — trust the write path) | N/A |
+| Read-only tool | Never | N/A |
+
+### Config
+
+```yaml
+kukuvaia:
+  verification:
+    enabled: ${KUKUVAIA_VERIFICATION_ENABLED:true}
+    # Block turn on FAIL status (advisor interrupts response, asks supervisor to repair).
+    # When false, FAIL only surfaces as a warning ReviewBlock — user sees the concern but flow continues.
+    block-on-fail: ${KUKUVAIA_VERIFICATION_BLOCK:false}
+    # Max confidence decrement before auto-escalating to a larger tier via P19.
+    auto-escalate-below: 0.5
+    suspicious-breadth-threshold: 8
+```
+
+Defaults keep verification observational (warn, don't block) until operators have seen enough data to trust it. `block-on-fail=true` is the endpoint of the journey — once calibration data (Pillar 3) shows the verifier itself is well-calibrated per domain.
+
+### Relationship to other pillars
+
+- **Pillar 1 (Provenance)** — `VerificationResult` is itself a `Provenance(TOOL, "verify_action", VERIFIED)` on the post-action claim. Users see green/yellow/red per action, not only per fact.
+- **Pillar 2 (RED_TEAM)** — Pillar 2 is POST-HOC on plan _text_, Pillar 5 is POST-HOC on plan _execution_. Complementary, never overlap.
+- **Pillar 3 (Calibration)** — every verification outcome (and any subsequent user override of that outcome) becomes a calibration event, so the verifier itself gets calibrated per model / domain.
+- **Pillar 4 (Experts)** — domain-specific experts can ship their own verifier tools (e.g., a Terraform expert ships a `terraform plan` verifier).
+
+### Why separate from existing `hooks.py`-style tool post-processing
+
+Spring AI advisors already let us hook tool results, but they run **inside the ChatClient reasoning loop** — the supervisor sees hook results and can rationalise past them. `VerificationEngine` runs as a peer, produces a `VerificationResult` block that is **attached to the output, not fed back into the supervisor**. The user sees it alongside the agent's answer; the agent cannot revise the verifier's view of reality. That separation is what makes the honesty guarantee work.
+
+### Additional deterministic mechanisms (Villani R2)
+
+Second-pass research (2026-04-20) pulled six more mechanisms that extend Pillar 5 while keeping decisions out of the LLM:
+
+#### Before/after content snapshots
+
+Villani reference: `autonomy.py:99-126`, `mission_state.py:50-51`. Before every side-effecting tool call (`Patch`, `Write`, DB mutation), capture the target's current state. After the call, diff. If the expected change didn't land → emit `FailedAssumption` finding automatically, no LLM judgement.
+
+Implementation hook: `ToolCallAdvisor` intercepts mutating tool calls, runs `ReadBeforeEditGuard`, stores snapshot in `ExecutionContext.beforeContents: Map<Path, String>`. `VerificationEngine.verify()` consumes this map.
+
+Impossible to do post-hoc without the snapshot — must be captured pre-call. Small cost (one extra read per edit) pays for itself on every false-success turn it catches.
+
+#### Task lifecycle state machine
+
+Villani reference: `autonomous.py:53-61, 516-520`. A `LineageTask` moves through a fixed state machine:
+
+```
+PENDING → RUNNING → (PASSED | FAILED | BLOCKED | RETRYABLE)
+RETRYABLE → RUNNING (max N times) → EXHAUSTED
+```
+
+Key invariant: each state has a `terminalFingerprint = sha256(sorted(finding.category + evidenceRef))` at the moment of transition. If a task transitions `FAILED → RETRYABLE → FAILED` and the fingerprint is identical → forced transition to `EXHAUSTED`, no further retries allowed.
+
+Java mapping: `kukuvaia.tasks.LineageTaskState` sealed interface with strict enum-switch transitions. Prevents the "retry retry retry with same inputs" failure mode common in small-model autonomous runs.
+
+#### Repair engine with prior-attempts context
+
+Villani reference: `repair.py:38-106`. When repairing a failure, the repair prompt **contains the history of prior attempts** so the model cannot silently repeat the same fix:
+
+```
+Prior repair attempts:
+1. failing_step="run tests" → failure="ImportError: no module foo"
+   repair_summary="added import foo at top of bar.py"
+   status=FAILED (same ImportError)
+2. failing_step="run tests" → failure="ImportError: no module foo"
+   repair_summary="created empty foo.py in project root"
+   status=FAILED (PYTHONPATH issue)
+```
+
+Combined with the 13-category classifier below, each attempt narrows the strategy:
+
+- Attempt 1 — free strategy choice
+- Attempt 2 — strategy must be different category (repair catalog enforces)
+- Attempt 3 — STOP, escalate to user or larger tier
+
+Bounded by `kukuvaia.repair.max-attempts: 3` (default).
+
+#### 13-category `FailureCategory` enum with retry policy
+
+Villani reference: `autonomy.py:311-387`. Extends the 9-category `FindingCategory` from Pillar 5 (those are _what's wrong with the output_) with _why it went wrong_ categories for execution:
+
+```java
+public enum FailureCategory {
+    MODEL_CONFUSION          (Retry.DIFFERENT_PROMPT),
+    TOOL_SCHEMA_MISMATCH     (Retry.FIX_ARGS),
+    TOOL_RUNTIME_ERROR       (Retry.SAME),
+    TEST_FAILURE             (Retry.REPAIR_CODE),
+    COMPILATION_ERROR        (Retry.REPAIR_CODE),
+    PERMISSION_DENIED        (Retry.NEVER),
+    RATE_LIMITED             (Retry.BACKOFF),
+    TIMEOUT                  (Retry.BACKOFF),
+    NETWORK_ERROR            (Retry.BACKOFF),
+    FILE_NOT_FOUND           (Retry.LOCATE_FIRST),
+    MERGE_CONFLICT           (Retry.NEVER),        // human
+    OUT_OF_SCOPE             (Retry.NEVER),        // user clarification
+    UNKNOWN                  (Retry.ESCALATE);     // try once, then stop
+}
+```
+
+Classifier is pure keyword matching over the tool result + exception type. No LLM call.
+
+`RepairEngine` reads the category → decides retry policy. Decision is a table lookup, not a reasoning step.
+
+#### Opportunity priority ranking (empirical-weighted)
+
+Villani reference: `autonomy.py:423-433`, `autonomous.py:496-506`. When there are multiple possible next actions, rank by:
+
+```
+score = (static_priority * 0.6) + (empirical_win_rate[category] * 0.4)
+```
+
+`empirical_win_rate` is a per-category rolling success rate maintained by Pillar 3 (Calibration). Start at 0.5 for unknown categories; update on every `PASS` / `FAIL` outcome.
+
+The supervisor always picks the top-scored opportunity — no LLM "which should I do next?" call for autonomous workflows. Manual chat is unaffected; this fires only inside autonomous / wave-based execution.
+
+#### Scope expansion lock
+
+Villani reference: `state_runtime.py:541-575`. Once an action is in progress, agent declares `intendedTargets: List<Path>` (the files it expects to change). Any edit outside that list requires a one-time `scope_expansion` with evidence (a prior Read of the adjacent path). After that single expansion, further widening = `BLOCKED`.
+
+Implementation: boolean `scopeExpansionUsed` in `ExecutionContext`, enforced by `ToolCallAdvisor` before each `Patch`/`Write` call. Blocks the `SuspiciousBreadth` failure class at the tool boundary rather than after the fact.
+
+#### Read-before-edit guard
+
+Villani reference: `state_runtime.py:518-539`. Hard rule: cannot `Patch` or `Write` a file that the agent hasn't `Read` in the current turn. For files that exist, the guard auto-inserts a `Read` call before the edit (no LLM involvement). For files that don't exist, `Patch` is rejected (must use `Write` explicitly, with a declared intent).
+
+Removes an entire class of hallucinated-edit bugs on small models.
+
+---
+
+## Determinism-first adoption path
+
+The overarching design principle, reinforced by Villani's benchmark: **runtime discipline beats model size**. Every decision that can move from an LLM call to a deterministic rule improves cost, latency, and honesty simultaneously.
+
+### ROI-ranked implementation order
+
+When Pillar 5 activates, implement mechanisms in this order (most deterministic / highest ROI first):
+
+| # | Mechanism | LLM cost saved | Risk | Dependencies |
+|---|---|---|---|---|
+| 1 | Stop decision via category-state enum-switch (P14 pattern) | ~30% | Low | `MissionState.categoryStates` |
+| 2 | Category state tracking (P14 pattern) | ~25% | Low | None — pure state update |
+| 3 | VerificationEngine with 2 findings (`IncompleteEdit`, `SuspiciousBreadth`) | ~20% | Medium | Before/after snapshots |
+| 4 | `FailureCategory` enum + keyword classifier | ~18% | Low | None |
+| 5 | Atomic message units + signal-token compaction (P14) | ~15% | Medium | Message window wrapper |
+| 6 | Repair strategy catalog (table lookup, not LLM) | ~10% | Low | `FailureCategory` |
+
+### Anti-patterns — where not to let the LLM decide
+
+Even Villani leaves a few decisions to the LLM unnecessarily. Kukuvaia should make these deterministic from day one:
+
+| Decision | Villani current | Deterministic replacement |
+|---|---|---|
+| Repair strategy choice | Free-form repair prompt | Enum lookup: `FailureCategory → Retry policy → strategy catalog entry` |
+| RED_TEAM finding severity | Adversarial LLM labels `AUTO_FIX`/`RECOMMEND`/`INFO` | Enum-switch: contradicts `knownFacts`/`excludedOptions` → `AUTO_FIX`; optional optimisation → `RECOMMEND`; everything else → `INFO` |
+| `delegateToWorker` choice (P14) | Supervisor LLM decides per call | Rule: `if task_contract == INSPECTION && pressure >= MODERATE && context_messages < 10 → delegate` |
+| Patch vs Write choice | LLM tool selection | Heuristic: file exists + size < 10KB + line count < 200 → `Patch`; else → `Write` |
+| Scope expansion permission | Not in scope (already deterministic in Villani) | Keep as-is — boolean flag with evidence check |
+
+Each anti-pattern replacement is additive: LLM can still propose, but the rule gates the action. If the rule says `no`, the LLM is asked to pick differently, not to argue.
+
+### Why this path matters for self-hosted kukuvaia
+
+Open-source kukuvaia targets operators running their own models on their own hardware — often 7B-27B class. Every decision left to the LLM is a decision that fails more often on a small model. The 6+5 mechanisms above move the failure surface from "LLM reasoning quality" to "our rule coverage" — a much more fixable problem.
+
+Villani's 92.5% success rate at 27B vs Claude Code's 70% is the empirical case for this path. We don't need to be smarter; we need to constrain the decision space harder.
+
+### Phased activation (Pillar 5)
+
+1. **Phase A** — `VerificationEngine` service + `Finding` model + `SuspiciousBreadth` and `IncompleteEdit` findings (the two highest-value categories, both mechanical).
+2. **Phase B** — Add `Regression` (run test command from persona config), `BrokenReference` (parse-only check for Java/Go patches).
+3. **Phase C** — Fingerprint + loop detection, auto-escalation hook into P19.
+4. **Phase D** — `block-on-fail=true` default for at least one persona (start with a "strict" persona for infra-mutating operations).
+
+---
+
 ## Two verification moments — PRE-HOC and POST-HOC
 
 Fact checking happens at two distinct moments. They are not substitutes; they compose.
@@ -216,9 +465,10 @@ PRE-HOC stops bad claims from being produced. POST-HOC catches what slipped thro
 | Pillar | Normal chat | `/plan` | Rationale |
 |--------|-------------|---------|-----------|
 | **1. Provenance Ledger** | ✅ | ✅ | Foundational. Every `OutputBlock` carries sources, everywhere. |
-| **2. Red-Team Verification** | ❌ | ✅ | POST-HOC pass doubles cost and latency. Only worth it for structured, consequential outputs (plans). |
+| **2. Red-Team Verification** | ❌ | ✅ | POST-HOC pass on plan _text_ doubles cost and latency. Only worth it for structured, consequential outputs (plans). |
 | **3. Empirical Calibration** | ✅ | ✅ | Chat is the majority of traffic and the main data source for calibration curves. |
 | **4. Expert Marketplace** | ✅ | ✅ | Domain routing benefits every turn, not only planning. Geography-expert helps `"ile godzin z Warszawy do Zakopanego?"` the same way it helps a `/plan`. |
+| **5. VerificationEngine** | ✅ (side-effecting turns only) | ✅ (during execution) | Fires whenever the agent runs a side-effecting tool — patch, bash, DB write. Read-only turns skip it (no cost, nothing to verify). |
 
 ## Flow — normal chat (PRE-HOC only)
 
@@ -291,6 +541,31 @@ Each pillar ships independently once a trigger is met. Order below is the recomm
 - Wire calibration rollups into advisor: force-ground claims in low-calibration domains.
 - **Trigger:** once `calibration_events` has N ≥ 500 per domain for the dominant model.
 
+### Phase 6 — VerificationEngine (Pillar 5)
+
+- Implement `VerificationEngine` service + `Finding` / `FindingCategory` sealed hierarchy.
+- Mark mutating tools with `@Tool(hasSideEffect=true)` or equivalent metadata; advisor watches for those.
+- Start with 2 finding categories (`IncompleteEdit`, `SuspiciousBreadth`) — highest-value mechanical checks, no model calls needed.
+- Default `block-on-fail=false` (observational mode) — surface verification as a new `ReviewBlock` alongside the answer.
+- Add `kukuvaia.verification.*` config with sensible defaults.
+- **Trigger:** when the first operator reports "the agent claimed it edited X but it didn't" — which is the exact failure mode Villani's data shows smaller models fall into most.
+
+### Phase 7 — Determinism extensions (Villani R2 patterns)
+
+Activated alongside or immediately after Phase 6, in the ROI order from the "Determinism-first adoption path" section above:
+
+- **7a** — Category state tracking in `MissionState` + stop-decision enum-switch.
+- **7b** — Before/after snapshots in `ExecutionContext` (prerequisite for the remaining Pillar 5 finding categories).
+- **7c** — `FailureCategory` enum (13 categories) + keyword classifier + retry policy table.
+- **7d** — Atomic message units + signal-token compaction (P14 integration point).
+- **7e** — `LineageTask` state machine with terminal fingerprint.
+- **7f** — Repair engine with prior-attempts context + max-attempts cap.
+- **7g** — Scope expansion lock + read-before-edit guard enforced at `ToolCallAdvisor`.
+- **7h** — Opportunity priority ranking (autonomous workflows only).
+- **7i** — Eliminate the four anti-patterns — move repair strategy, RED_TEAM severity, `delegateToWorker` choice, and Patch/Write choice to deterministic rules.
+
+Each sub-phase is independent and can ship behind its own feature flag. Trigger: same as Phase 6 — first failure-mode report from a small-model deployment.
+
 ---
 
 ## Risks and mitigations
@@ -321,7 +596,8 @@ No data migrations required to unwind.
 ## Relationship to other plans
 
 - `docs/plan/P04-conversation-summarization.md` — orthogonal (compacts old turns); composes cleanly.
-- `docs/plan/P14-tiered-context.md` — orthogonal (context window sizing); expert marketplace (Pillar 4) naturally uses tiered context budgets once P14 is active.
+- `docs/plan/P14-tiered-context.md` — orthogonal (context window sizing); expert marketplace (Pillar 4) naturally uses tiered context budgets once P14 is active. `ContextPressureAdvisor` (P14) consumes Pillar 5 loop-detection signals to decide when to escalate or prune.
+- `/tmp/villani-code` research (mmprotest/villani-code, 2026-04-20) — source of Pillar 5 design. Their benchmark shows that an adversarial verifier lets a 27B open model outperform Claude Code on bounded repo tasks.
 - `docs/plan/P06-content-moderation.md` — Red-team phase may share infrastructure with moderation passes.
 - `docs/plan/P01-observability.md` — calibration dashboard piggybacks on observability surface.
 

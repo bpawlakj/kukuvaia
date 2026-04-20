@@ -30,6 +30,14 @@ kukuvaia:
     # authoritative keyword classifier and records divergence via the
     # `kukuvaia.routing.shadow_diff` counter. Never mutates the request.
     shadow-mode: ${KUKUVAIA_ROUTING_SHADOW_MODE:true}
+  supervisor:
+    # P14 small-supervisor mode. FULL ships the verbose system prompt with
+    # proactivity rules (safe for 70B+ / frontier models). CONCISE ships a
+    # bounded, imperative prompt (<60 words, English only) for 7B-27B local
+    # models — proactivity behaviour moves from prompt to deterministic
+    # advisors (SessionContextAdvisor injects structured prompts only when
+    # relevant state exists).
+    verbosity: ${KUKUVAIA_SUPERVISOR_VERBOSITY:FULL}
 
 spring:
   application:
@@ -58,6 +66,20 @@ spring:
         repository:
           jdbc:
             initialize-schema: always
+    # P22 — remote MCP consumption. Connections + auth headers are read from the
+    # `kukuvaia.mcp_connections` table (managed through the admin dashboard) via
+    # the DbMcpSseClientConnectionDetails bean. There is intentionally no
+    # `sse.connections.*` block here — connection list lives in the DB so ops
+    # can add/rotate remote MCP servers without a redeploy.
+    mcp:
+      client:
+        enabled: ${KUKUVAIA_MCP_CLIENT_ENABLED:false}
+        name: kukuvaia-engine
+        version: 0.1.0
+        request-timeout: 30s
+        type: SYNC
+        toolcallback:
+          enabled: true
   datasource:
     url: ${PG_DSN:jdbc:postgresql://localhost:5432/kukuvaia}?currentSchema=kukuvaia,public
     username: ${PG_USER:kukuvaia}

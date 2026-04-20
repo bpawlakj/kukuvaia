@@ -39,4 +39,27 @@ class PersonaServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("nonexistent");
     }
+
+    @Test
+    @DisplayName("getActivePersona — FULL verbosity uses the proactivity-rules prompt")
+    void getActivePersona_fullVerbosity_usesFullPrompt() {
+        var service = new PersonaService(SupervisorVerbosity.FULL);
+
+        var prompt = service.getActivePersona("s").systemPrompt();
+
+        assertThat(prompt).contains("Proactivity rules");
+        assertThat(prompt.split("\\s+")).hasSizeGreaterThan(100);
+    }
+
+    @Test
+    @DisplayName("getActivePersona — CONCISE verbosity uses a short imperative prompt (<60 words)")
+    void getActivePersona_conciseVerbosity_usesShortPrompt() {
+        var service = new PersonaService(SupervisorVerbosity.CONCISE);
+
+        var prompt = service.getActivePersona("s").systemPrompt();
+
+        assertThat(prompt).doesNotContain("Proactivity rules");
+        assertThat(prompt.split("\\s+")).hasSizeLessThan(60);
+        assertThat(prompt).startsWith("You are Kukuvaia.");
+    }
 }

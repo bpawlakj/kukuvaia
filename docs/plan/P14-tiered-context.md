@@ -149,6 +149,175 @@ CommandRouter → AgentService.streamChat
 - Medium term: supervisor-LLM-driven delegation replaces most heuristic turn-level routing. `ModelRoutingAdvisor` falls back to "pick sensible default tier" — the interesting decisions happen inside the tool-call loop.
 - Long term: calibration-driven forcing (P15 Pillar 5) removes the remaining reliance on the supervisor noticing its own uncertainty.
 
+## Small-supervisor mode (Villani-inspired)
+
+Cross-referenced with `/tmp/villani-code` research (2026-04-20). Villani's benchmark (Qwen 27B > Claude Code) shows that **runtime discipline beats raw capacity** — the win comes from bounded context, signal-token compaction, and pressure-level monitoring, not from a bigger model. Kukuvaia should be able to run with a 7B–27B self-hosted supervisor; this section defines what changes when the supervisor tier is `SMALL`.
+
+### Config knob
+
+```yaml
+kukuvaia:
+  supervisor:
+    # LARGE (default) — full proactivity rules, 20-message window, verbose prompt
+    # SMALL           — concise prompt, tighter budgets, signal-token compaction enforced
+    verbosity: ${KUKUVAIA_SUPERVISOR_VERBOSITY:FULL}   # FULL | CONCISE
+  context:
+    # Hard budget (tokens) at which ContextPressureAdvisor starts shedding low-priority items.
+    budget-tokens: ${KUKUVAIA_CONTEXT_BUDGET:35000}
+    pressure-thresholds:
+      moderate: 0.45   # start emitting metrics
+      high:     0.75   # start pruning stale items
+      overflow: 1.00   # force-prune FIFO
+```
+
+### System prompt variant
+
+`PersonaService` picks a prompt based on `kukuvaia.supervisor.verbosity`. Both variants live in code (not YAML) because they are stack-critical defaults.
+
+- `FULL` — current prompt (proactivity rules, ambiguity discipline, Session Context usage).
+- `CONCISE` — Villani-style bounded discipline, <60 words, imperative, English:
+
+  > You are Kukuvaia. Use tools for every factual or action-taking step; never assert results without a tool. Before editing, name the likely target. Prefer minimal changes. Ask one short clarifying question when intent is ambiguous. Say "unknown" rather than invent.
+
+  Proactivity (unfinished plans, commitments) moves from prompt to code — `SessionContextAdvisor` injects structured prompts only when such state exists, so the small model does not carry always-on instructions it will forget.
+
+### Context pressure levels
+
+Villani's `ContextPressureLevel` adapted as a new `ContextPressureAdvisor` (before `MessageChatMemoryAdvisor` in the chain):
+
+| Level | Threshold | Behaviour |
+|---|---|---|
+| `LOW` | <45% budget | No-op. Emit `kukuvaia.context.usage` gauge. |
+| `MODERATE` | 45–75% | Start compacting new tool outputs (signal-token filter). Emit warning counter. |
+| `HIGH` | 75–100% | Prune stale items: repair attempts ≥ 2, oldest tool results with `PASS` outcome, duplicated memory hits. |
+| `OVERFLOW_RISK` | >100% | FIFO-prune active items until back under budget. Log structured event with `pruned_count`. |
+
+Composes with P04 (conversation summarisation) — summarisation happens first, pressure-driven pruning is the safety net.
+
+### Signal-token compaction
+
+When `verbosity=CONCISE` or pressure ≥ `MODERATE`, tool outputs going into the next turn's context are filtered line-by-line keeping only lines containing signal tokens:
+
+- Shell / bash: `error`, `failed`, `exit`, `warning`, `traceback`
+- Test runs: `FAILED`, `PASSED`, `error`, `assertion`, `at line`
+- SQL: `ERROR`, `WARNING`, `rows affected`
+- Repo reads: first 40 lines + last 20 lines + lines matching the query
+
+Full output is still persisted (`conversations` JSONB) — compaction is applied only to the **prompt projection**, so debug never loses data.
+
+### Tiered budgets for small supervisor
+
+When `verbosity=CONCISE`:
+
+| Role | `FULL` budget | `CONCISE` budget | Rationale |
+|---|---|---|---|
+| Supervisor | 50 msgs | **10 msgs** | 7B/13B models drift past ~10 turns. |
+| Worker | 5 msgs | **3 msgs** | Already scoped; shrink further to save prompt. |
+| Minimal | 0 | 0 | Unchanged. |
+
+### Stale context detection
+
+Villani pattern — if `repair_attempts ≥ 2` and active items > N, we are in a loop. Signal from `ContextPressureAdvisor`:
+
+- If the same tool call (by name + argument hash) returns a failure outcome for the third time in a row → inject `"Loop detected — change approach or escalate."` into next turn and emit `kukuvaia.context.stale_loop_detected` counter.
+- If 3 consecutive turns produce no edit and supervisor is in `SMALL` mode → force escalate (raise `verbosity` back to `FULL` for one turn, or hand off to larger model via P19 routing).
+
+### Relationship to existing plans
+
+- `ModelRoutingAdvisor` picks the tier per turn (FAST / DEFAULT / ESCALATE) — does not know about pressure.
+- New `ContextPressureAdvisor` runs every turn, regardless of tier. It informs pruning, not routing.
+- P19 (complexity-driven routing) can consume pressure signals as an additional feature at activation time.
+
+### Additional determinism patterns (Villani R2)
+
+Second-pass research of Villani (2026-04-20, `/tmp/villani-code`) surfaced three more patterns worth adopting. All three push decisions from LLM calls to deterministic code, which compounds with the `CONCISE` prompt — small models benefit doubly (shorter prompt + fewer judgement calls to make).
+
+#### Atomic message units during compaction
+
+Pressure-driven pruning must not split a `[tool_use → tool_result]` pair. Villani reference: `context_budget.py:82-93`. A dropped tool_result with a kept tool_use confuses every subsequent turn because the model sees a phantom request.
+
+Rule for `ContextPressureAdvisor.prune()`:
+
+- Group messages into atomic units: assistant message with `tool_calls` + its matching user-role `tool` responses form one unit.
+- Drop or keep whole units, never partial.
+- A unit's priority = max priority of its members (so important tool results protect their assistant turn).
+
+Java-side hook: extend `MessageWindowChatMemory` wrapper to iterate by `AtomicMessageUnit` list, not by `Message`.
+
+#### Deterministic turn summarisation
+
+Instead of calling an LLM to summarise old turns (P04 default path), extract structural fields via regex / parsing. Villani reference: `context_budget.py:128-193`.
+
+Fields extracted per turn:
+
+- **objectives** — lines the user wrote beginning with `want`, `need`, `please`, or containing `?`.
+- **files_read** — tool_result blocks where the tool name is `Read`, `Grep`, `Glob`.
+- **edits** — tool_result blocks where the tool name is `Write`, `Patch`, `Edit`.
+- **validations** — tool_result blocks where the tool name is `Bash` and stdout contains test/validation tokens.
+- **blockers** — tool_result blocks with exit code != 0 or containing `error`, `failed`, `traceback`.
+
+Output format injected at the head after compaction:
+
+```
+[Earlier turns summary]
+Objectives: …
+Files read: src/foo.java, test/FooTest.java
+Edits: src/foo.java (+12, −3)
+Validations: FooTest passed (8/8)
+Blockers: none
+```
+
+Pure string operations, no LLM call. Composes with P04 — deterministic summary is the default, P04's LLM-based summary kicks in only when `--rich-summary` is requested or when deterministic output is judged too sparse.
+
+#### Category state tracking
+
+Villani reference: `autonomous_progress.py:10-37`. An autonomous agent tracks a small map of artefact categories (tests, docs, entrypoints, imports) with states `unknown | discovered | attempted | exhausted`. The stop decision is an enum-switch on the tuple, not a question to the LLM.
+
+For kukuvaia, extend `MissionState` (used by P15 Pillar 5 and autonomous workflows) with:
+
+```java
+public record CategoryState(
+        String category,       // tests, docs, entrypoints, imports, configs, …
+        Stage stage,           // UNKNOWN, DISCOVERED, ATTEMPTED, EXHAUSTED
+        int attempts
+) {
+    public enum Stage { UNKNOWN, DISCOVERED, ATTEMPTED, EXHAUSTED }
+}
+```
+
+Updated deterministically after each turn: tool result with `Read src/…/Test…java` moves `tests` from UNKNOWN to DISCOVERED; a `Bash` running that test moves it to ATTEMPTED; three ATTEMPTED + still failing → EXHAUSTED.
+
+Stop decision: `if categories.stream().allMatch(c -> c.stage == EXHAUSTED || c.stage == ATTEMPTED) && confidence < 0.5 → STOP`. No LLM ask-yourself-if-you're-done call.
+
+### Villani reference values (anchors for defaults)
+
+Concrete numbers from `/tmp/villani-code/villani_code/execution.py:37-43` and related — useful as starting defaults when activating phases, not as gospel:
+
+| Limit | Villani value | Our file | Notes |
+|---|---|---|---|
+| `max_turns` | 20 | `execution.py:37` | Autonomous wave only |
+| `max_tool_calls` | 40 | `execution.py:38` | Per task |
+| `max_seconds` | 180 | `execution.py:39` | Per task |
+| `max_no_edit_turns` | 8 | `execution.py:40` | Loop guard — no edit for 8 turns → stop |
+| `max_consecutive_recon_turns` | 6 | `execution.py:41` | Too much inspection without action → stop |
+| Small-model context chars | 35000 | `state.py:504` | ~8.7K tokens |
+| Small-model keep_last_turns | 4 | `state.py:505` | |
+| `Read.max_bytes` | 50000 | `state_runtime.py:592` | |
+| `Grep.max_results` | 60 | `state_runtime.py:593` | |
+| Bash stdout truncation | >6000 → first 2K + last 3K | `state_runtime.py:598` | |
+
+### Small-model readiness — external reference
+
+Villani's benchmark (Qwen 4B-27B) and design suggest small models are ready **only when**:
+
+- Model has reliable structured tool-use (rules out GPT-2-style, some early 4B models).
+- Model is instruction-following (Qwen 32B ✅, Llama 3.1 70B ✅, Mistral 7B borderline, Phi-3 ❌ on complex instruction chains).
+- Caller accepts the budget discipline (hard turn/tool/time caps, scope locks, read-before-edit).
+
+For kukuvaia, auto-activate `verbosity=CONCISE` when `ModelRoutingAdvisor.activeTier == FAST` or `context_window < 50_000` tokens — two cheap signals that correlate with the model tier.
+
+---
+
 ## Implementation phases (when triggered)
 
 1. **Phase 1 — Budget plumbing**

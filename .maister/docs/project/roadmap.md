@@ -183,6 +183,8 @@ Differentiator against closed-source agents: transparent trust model.
 - [ ] **Pillar 2 — Red-Team Verification + Auto-Correction**: new `RED_TEAM` phase between DRAFTING and APPROVAL. Findings split into `AUTO_FIX` (mechanical defects — silent re-DRAFTING, 1-iteration cap, audit to `plan_revisions`), `RECOMMEND` (judgment calls — per-item checkboxes in APPROVAL panel) and `INFO` (audit trail only). `/plan --no-auto-fix` opt-out. Default supervisor-tier; advisor-tier only for `--strict`.
 - [ ] **Pillar 3 — Empirical Calibration**: per-model per-domain accuracy tracking; force grounding in low-calibration domains
 - [ ] **Pillar 4 — Pluggable Expert Marketplace**: `.kukuvaia/experts/*.yaml` with domain tools (geography-expert → OSM, legal-expert → corpus)
+- [ ] **Pillar 5 — Post-Execution VerificationEngine** (Villani-inspired): detached adversarial verifier after every side-effecting tool call; 9-category `FindingCategory` sealed hierarchy; confidence scoring; fingerprint-based loop detection; PASS/FAIL/UNCERTAIN/REPAIRED status. Observational by default, `block-on-fail` opt-in.
+- [ ] **Phase 7 determinism extensions**: before/after snapshots, `LineageTask` state machine, 13-cat `FailureCategory` enum, repair engine with prior-attempts context, scope-expansion lock, read-before-edit guard, opportunity priority ranking, four anti-pattern eliminations (repair strategy / RED_TEAM severity / delegateToWorker / Patch-vs-Write as deterministic rules).
 - See: `docs/plan/P15-honest-agent.md`
 
 ### 4D. Tiered Context `[Effort: M–L]` — **P14**
@@ -191,6 +193,9 @@ Differentiator against closed-source agents: transparent trust model.
 - [ ] `DelegationTools.delegateToWorker` — symmetric to `consultExpert` (P15), routes simple subtasks to cheap worker tier
 - [ ] Escalation protocol (`NEEDS_MORE_CONTEXT` signal)
 - [ ] Integration diagram showing how `ModelRoutingAdvisor` + P14 + P15 compose
+- [ ] **Small-supervisor mode** (Villani-inspired): `kukuvaia.supervisor.verbosity=FULL|CONCISE` config, `ContextPressureAdvisor` with 4 pressure levels (LOW/MODERATE/HIGH/OVERFLOW_RISK), signal-token compaction, tight budgets for 7B-27B models, stale-context + loop detection. Auto-activates when `tier==FAST` or `context<50K`.
+- [ ] **R2 determinism patterns**: atomic message units during compaction, deterministic turn summarisation (regex extraction of objectives/edits/blockers), category state tracking (`unknown → discovered → attempted → exhausted`) as stop-decision input.
+- [x] Partial: supervisor verbosity config + prompt variant wired in `PersonaService` (`kukuvaia.supervisor.verbosity`, 2026-04-20)
 - See: `docs/plan/P14-tiered-context.md`
 
 ### 4E. Stepped Reasoning `[Effort: L–XL, feature-flagged]` — **P16**
@@ -303,4 +308,4 @@ Quick reference — which plan document belongs to which milestone:
 
 **Effort Scale**: `S` 2–3 days | `M` ~1 week | `L` 2+ weeks | `XL` 1+ month
 
-*Last updated: 2026-04-20 (4J / P22 draft — MCP bridge to sl-content corpus, first realisation of P15 Pillar 4; 4I / P21 draft — plan registry & composition; 4H / P20 draft — routing self-tuning; P15 Pillar 2 expanded; 4G / P19 Phase 1 shipped)*
+*Last updated: 2026-04-20 (4D / P14 + 4C / P15 expanded — Villani research R1+R2: small-supervisor mode in P14, Pillar 5 VerificationEngine + Phase 7 determinism extensions in P15, partial P14 implementation of verbosity config; 4J / P22 draft — MCP bridge to sl-content corpus, first realisation of P15 Pillar 4; 4I / P21 draft — plan registry & composition; 4H / P20 draft — routing self-tuning; P15 Pillar 2 expanded; 4G / P19 Phase 1 shipped)*

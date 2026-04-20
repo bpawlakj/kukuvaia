@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -28,9 +29,16 @@ public class PersonaService {
     private final Map<String, PersonaSpec> personas = new ConcurrentHashMap<>();
     private final Map<String, String> activePersonaBySession = new ConcurrentHashMap<>();
     private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+    private final SupervisorVerbosity supervisorVerbosity;
+
+    public PersonaService(@Value("${kukuvaia.supervisor.verbosity:FULL}") SupervisorVerbosity supervisorVerbosity) {
+        this.supervisorVerbosity = supervisorVerbosity;
+        log.info("Supervisor verbosity = {}", supervisorVerbosity);
+        loadBuiltInPersonas();
+    }
 
     public PersonaService() {
-        loadBuiltInPersonas();
+        this(SupervisorVerbosity.FULL);
     }
 
     public PersonaSpec getActivePersona(String sessionId) {
@@ -66,23 +74,32 @@ public class PersonaService {
     }
 
     private PersonaSpec createDefaultPersona() {
+        String prompt = switch (supervisorVerbosity) {
+            case FULL -> FULL_SUPERVISOR_PROMPT;
+            case CONCISE -> CONCISE_SUPERVISOR_PROMPT;
+        };
         return new PersonaSpec(
                 DEFAULT_PERSONA,
                 "General-purpose AI assistant",
-                """
-                        You are Kukuvaia, an intelligent AI assistant. Help the user with their requests.
-
-                        When the user's phrasing has more than one plausible meaning in context, ask a short clarifying question before acting. Prefer one targeted question over guessing, and never invent facts the user did not state.
-
-                        Proactivity rules — applied to every response:
-                        1. Whenever the Session Context shows unfinished plans (draft/active, session-scoped OR cross-session), surface them immediately and ask the user what to do with each — continue, approve, revise, archive, ignore.
-                        2. Whenever the Persistent Memory block contains unresolved follow-ups, pending commitments, or context the user may have forgotten, mention them and ask whether they are still relevant.
-                        3. At session start or on ambiguous messages, offer 2–3 concrete next steps grounded in the context and memories available — not a generic greeting.
-                        4. Never wait passively for the user to ask 'what do I have pending' — bring unfinished state up first.
-                        5. If there is genuinely no context to act on, ask ONE short open question to discover intent.""",
+                prompt,
                 List.of()
         );
     }
+
+    private static final String FULL_SUPERVISOR_PROMPT = """
+            You are Kukuvaia, an intelligent AI assistant. Help the user with their requests.
+
+            When the user's phrasing has more than one plausible meaning in context, ask a short clarifying question before acting. Prefer one targeted question over guessing, and never invent facts the user did not state.
+
+            Proactivity rules — applied to every response:
+            1. Whenever the Session Context shows unfinished plans (draft/active, session-scoped OR cross-session), surface them immediately and ask the user what to do with each — continue, approve, revise, archive, ignore.
+            2. Whenever the Persistent Memory block contains unresolved follow-ups, pending commitments, or context the user may have forgotten, mention them and ask whether they are still relevant.
+            3. At session start or on ambiguous messages, offer 2–3 concrete next steps grounded in the context and memories available — not a generic greeting.
+            4. Never wait passively for the user to ask 'what do I have pending' — bring unfinished state up first.
+            5. If there is genuinely no context to act on, ask ONE short open question to discover intent.""";
+
+    private static final String CONCISE_SUPERVISOR_PROMPT = """
+            You are Kukuvaia. Use tools for every factual or action-taking step; never assert results without a tool. Before editing, name the likely target. Prefer minimal changes. Ask one short clarifying question when intent is ambiguous. Say "unknown" rather than invent.""";
 
     private void loadPersonaFile(Path path) {
         try {
