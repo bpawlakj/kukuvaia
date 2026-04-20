@@ -25,6 +25,19 @@ var InputBoxFocusedStyle = lipgloss.NewStyle().
 	BorderForeground(ColorPrimary).
 	Padding(0, 1)
 
+// Planning mode — yellow border signals active /plan flow.
+var InputBoxPlanningStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(ColorWarning).
+	Padding(0, 1)
+
+// Planning badge — small pill shown above the input while in planning mode.
+var PlanningBadgeStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#000000")).
+	Background(ColorWarning).
+	Bold(true).
+	Padding(0, 1)
+
 // User message — surface background with pointer prefix.
 var UserMsgBoxStyle = lipgloss.NewStyle().
 	Foreground(ColorPrimary).

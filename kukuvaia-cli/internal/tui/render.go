@@ -20,6 +20,12 @@ func RenderBlock(block api.OutputBlock, width int) string {
 		return renderVerification(b, width)
 	case api.MetadataBlock:
 		return renderMetadata(b, width)
+	case api.PlanListBlock:
+		// PlanListBlock drives the plan picker overlay — once consumed by
+		// findPlanListBlock it is stripped from chat history, but if one
+		// slipped through (e.g. offline playback), render a summary line
+		// instead of "[unknown block]".
+		return MutedStyle.Render("  [plan list — use /plans to open]")
 	default:
 		return MutedStyle.Render("[unknown block]")
 	}

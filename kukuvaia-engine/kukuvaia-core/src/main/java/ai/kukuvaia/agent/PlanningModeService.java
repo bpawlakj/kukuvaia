@@ -1,5 +1,8 @@
 package ai.kukuvaia.agent;
 
+import ai.kukuvaia.plans.PlansRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -19,9 +22,11 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -47,10 +52,15 @@ public class PlanningModeService implements BaseAdvisor {
     private final ConcurrentHashMap<String, PlanningSession> sessions = new ConcurrentHashMap<>();
     private final JdbcTemplate jdbcTemplate;
     private final ObjectProvider<ChatModel> chatModelProvider;
+    private final PlansRepository plansRepository;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public PlanningModeService(JdbcTemplate jdbcTemplate, ObjectProvider<ChatModel> chatModelProvider) {
+    public PlanningModeService(JdbcTemplate jdbcTemplate,
+                               ObjectProvider<ChatModel> chatModelProvider,
+                               PlansRepository plansRepository) {
         this.jdbcTemplate = jdbcTemplate;
         this.chatModelProvider = chatModelProvider;
+        this.plansRepository = plansRepository;
     }
 
     // --- State management ---
@@ -81,9 +91,24 @@ public class PlanningModeService implements BaseAdvisor {
                     before.excludedOptions().size(), newFacts.excludedOptions().size(),
                     before.remainingGaps().size(), newFacts.remainingGaps().size(),
                     before.ambiguities().size(), newFacts.ambiguities().size());
+            persistFactsForSession(id, newFacts);
             return session.withFacts(newFacts);
         });
         return updated != null ? updated.facts() : DiscoveryFacts.empty();
+    }
+
+    private void persistFactsForSession(String sessionId, DiscoveryFacts facts) {
+        try {
+            String json = objectMapper.writeValueAsString(facts);
+            jdbcTemplate.update("""
+                    UPDATE kukuvaia.plans SET discovery_facts = ?::jsonb, updated_at = NOW()
+                    WHERE session_id = ? AND status = 'draft'
+                    """, json, sessionId);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to serialise discovery facts: {}", e.getMessage());
+        } catch (Exception e) {
+            log.warn("Failed to persist facts for session={}: {}", sessionId, e.getMessage());
+        }
     }
 
     private DiscoveryFacts extractFactsOrEmpty(String task) {
@@ -120,6 +145,19 @@ public class PlanningModeService implements BaseAdvisor {
         return sessions.containsKey(sessionId);
     }
 
+    /**
+     * Returns true if there is a draft plan in the DB for this session.
+     * Used by {@code CommandRouter} as a safety net when the in-memory session
+     * map has evicted the session (engine restart, explicit cancel, etc.) but
+     * the user is still interacting with a pending approval decision.
+     */
+    public boolean hasDraftPlan(String sessionId) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM kukuvaia.plans WHERE session_id = ? AND status = 'draft'",
+                Integer.class, sessionId);
+        return count != null && count > 0;
+    }
+
     public Optional<PlanningSession> getSession(String sessionId) {
         return Optional.ofNullable(sessions.get(sessionId));
     }
@@ -131,6 +169,7 @@ public class PlanningModeService implements BaseAdvisor {
         sessions.computeIfPresent(sessionId, (id, session) -> {
             if (session.phase() == PlanningPhase.DISCOVERY) {
                 log.info("Planning phase transition: DISCOVERY → DRAFTING, sessionId={}", id);
+                persistPhaseForSession(id, "drafting");
                 return session.withPhase(PlanningPhase.DRAFTING);
             }
             return session;
@@ -144,10 +183,26 @@ public class PlanningModeService implements BaseAdvisor {
         sessions.computeIfPresent(sessionId, (id, session) -> {
             if (session.phase() == PlanningPhase.DRAFTING) {
                 log.info("Planning phase transition: DRAFTING → APPROVAL, sessionId={}", id);
+                persistPhaseForSession(id, "approval");
                 return session.withPhase(PlanningPhase.APPROVAL);
             }
             return session;
         });
+    }
+
+    /**
+     * Persist the phase column on the active draft plan row for this session.
+     * Best-effort: write fails are logged and swallowed so they never block a phase transition.
+     */
+    private void persistPhaseForSession(String sessionId, String phase) {
+        try {
+            jdbcTemplate.update("""
+                    UPDATE kukuvaia.plans SET phase = ?, updated_at = NOW()
+                    WHERE session_id = ? AND status = 'draft'
+                    """, phase, sessionId);
+        } catch (Exception e) {
+            log.warn("Failed to persist phase={} for session={}: {}", phase, sessionId, e.getMessage());
+        }
     }
 
     /**
@@ -164,16 +219,23 @@ public class PlanningModeService implements BaseAdvisor {
     }
 
     /**
-     * Approve plan and exit planning mode. Updates plan status in DB to 'active'.
+     * Approve plan and exit planning mode. Updates plan status in DB to 'active'
+     * regardless of whether the in-memory session map still holds this session —
+     * otherwise approval across an engine restart or session eviction silently
+     * leaves plans stuck in 'draft'.
      */
     public void approvePlan(String sessionId) {
-        var removed = sessions.remove(sessionId);
-        if (removed != null) {
-            int updated = jdbcTemplate.update("""
-                    UPDATE kukuvaia.plans SET status = 'active', updated_at = NOW()
-                    WHERE session_id = ? AND status = 'draft'
-                    """, sessionId);
+        sessions.remove(sessionId); // best-effort cleanup; absence is not an error
+        int updated = jdbcTemplate.update("""
+                UPDATE kukuvaia.plans SET status = 'active', updated_at = NOW()
+                WHERE session_id = ? AND status = 'draft'
+                """, sessionId);
+        if (updated > 0) {
             log.info("Plan approved: sessionId={}, dbUpdated={}", sessionId, updated);
+        } else {
+            log.warn("approvePlan: no draft plan found for sessionId={} — " +
+                    "either the plan was never saved or it was already approved/abandoned",
+                    sessionId);
         }
     }
 
@@ -191,6 +253,155 @@ public class PlanningModeService implements BaseAdvisor {
         }
     }
 
+    // --- P21 resume / combine / abandon ---
+
+    /**
+     * Rehydrate a planning session from a DB plan row. Loads phase + facts into
+     * the in-memory map so the advisor chain picks up the same DISCOVERY / DRAFTING /
+     * APPROVAL behaviour as if the user had never left.
+     *
+     * Cross-session resume is allowed: the plan becomes attached to {@code sessionId}
+     * even if it was originally created in a different session. DB's session_id stays
+     * on the row as audit trail; the in-memory map is keyed by the current session.
+     *
+     * @throws IllegalStateException when the plan does not exist, belongs to another
+     *         user (handled with same message to avoid leaking existence), or is in a
+     *         terminal phase (done/abandoned).
+     */
+    public PlanningSession resumeFromDb(UUID planId, String sessionId) {
+        // TODO: user id should come from auth context — using bartek fallback to match rest of codebase.
+        String userId = "bartek";
+        var state = plansRepository.findFullState(planId, userId)
+                .orElseThrow(() -> new IllegalStateException("Plan not found: " + planId));
+
+        if ("abandoned".equals(state.phase()) || "done".equals(state.phase())) {
+            throw new IllegalStateException("Plan is " + state.phase() + " — cannot resume");
+        }
+
+        DiscoveryFacts facts = parseFacts(state.discoveryFactsJson());
+        PlanningPhase phase = mapPhase(state.phase());
+        var session = new PlanningSession(state.task(), phase, Instant.now(), facts);
+        sessions.put(sessionId, session);
+
+        // Re-point the plan row at the current session (cross-session resume).
+        // Original session_id is preserved in log for audit.
+        jdbcTemplate.update("""
+                UPDATE kukuvaia.plans SET session_id = ?, updated_at = NOW() WHERE id = ?
+                """, sessionId, planId);
+        log.info("Plan resumed: planId={} originalSession={} currentSession={} phase={}",
+                planId, state.sessionId(), sessionId, phase);
+        return session;
+    }
+
+    /**
+     * Create a new plan that merges facts from multiple parent plans, starts in
+     * DISCOVERY phase, and inserts {@code plan_links} rows (relation='combines').
+     * Returns the new plan's id + merged facts for the caller to acknowledge.
+     */
+    public CombineResult combinePlans(List<UUID> parentIds, String newTask, String sessionId) {
+        if (parentIds == null || parentIds.isEmpty()) {
+            throw new IllegalStateException("combinePlans requires at least one parent");
+        }
+        // TODO: user id from auth context.
+        String userId = "bartek";
+        if (!plansRepository.allBelongToUser(parentIds, userId)) {
+            throw new IllegalStateException("One or more parent plans do not belong to current user");
+        }
+
+        // Load parent facts, merge, persist.
+        DiscoveryFacts merged = DiscoveryFacts.empty();
+        for (UUID parent : parentIds) {
+            var parentState = plansRepository.findFullState(parent, userId).orElse(null);
+            if (parentState == null) continue;
+            DiscoveryFacts parentFacts = parseFacts(parentState.discoveryFactsJson());
+            merged = mergeFacts(merged, parentFacts);
+        }
+
+        String factsJson;
+        try {
+            factsJson = objectMapper.writeValueAsString(merged);
+        } catch (JsonProcessingException e) {
+            factsJson = "{}";
+        }
+
+        String derivedName = newTask.length() > 60 ? newTask.substring(0, 57) + "…" : newTask;
+        UUID newPlanId = plansRepository.createPending(
+                sessionId, userId, newTask, derivedName, "discovery", factsJson);
+
+        for (UUID parent : parentIds) {
+            plansRepository.createLink(newPlanId, parent, "combines", null);
+        }
+
+        // Seed in-memory session with the merged state. Caller (CommandRouter)
+        // typically forwards to agentService right after this.
+        var session = new PlanningSession(newTask, PlanningPhase.DISCOVERY, Instant.now(), merged);
+        sessions.put(sessionId, session);
+
+        log.info("Plans combined: newPlanId={} parents={} mergedKnown={} mergedExcluded={}",
+                newPlanId, parentIds, merged.knownFacts().size(), merged.excludedOptions().size());
+        return new CombineResult(newPlanId, merged);
+    }
+
+    /**
+     * Mark a plan as abandoned — destructive, DB-level operation used by the
+     * picker's two-step 'd' action. Returns the number of rows affected.
+     */
+    public int abandonPlan(UUID planId) {
+        int updated = jdbcTemplate.update("""
+                UPDATE kukuvaia.plans SET status = 'abandoned', phase = 'abandoned', updated_at = NOW()
+                WHERE id = ? AND status <> 'abandoned'
+                """, planId);
+        if (updated > 0) {
+            log.info("Plan abandoned: planId={}", planId);
+        }
+        return updated;
+    }
+
+    /**
+     * Naive merge — union with exact-string dedup. Good enough for MVP; upgrade
+     * to LLM-assisted merge when users report duplication pain (see P21 open Q#1).
+     */
+    private static DiscoveryFacts mergeFacts(DiscoveryFacts a, DiscoveryFacts b) {
+        return new DiscoveryFacts(
+                dedupeUnion(a.knownFacts(), b.knownFacts()),
+                dedupeUnion(a.excludedOptions(), b.excludedOptions()),
+                dedupeUnion(a.remainingGaps(), b.remainingGaps()),
+                List.of()   // ambiguities are always re-asked during new DISCOVERY
+        );
+    }
+
+    private static List<String> dedupeUnion(List<String> first, List<String> second) {
+        Set<String> seen = new LinkedHashSet<>();
+        if (first != null) seen.addAll(first);
+        if (second != null) seen.addAll(second);
+        return List.copyOf(seen);
+    }
+
+    private DiscoveryFacts parseFacts(String json) {
+        if (json == null || json.isBlank() || "{}".equals(json.trim())) {
+            return DiscoveryFacts.empty();
+        }
+        try {
+            return objectMapper.readValue(json, DiscoveryFacts.class);
+        } catch (Exception e) {
+            log.warn("Failed to parse discovery_facts JSON, treating as empty: {}", e.getMessage());
+            return DiscoveryFacts.empty();
+        }
+    }
+
+    private static PlanningPhase mapPhase(String dbPhase) {
+        if (dbPhase == null) return PlanningPhase.APPROVAL;
+        return switch (dbPhase) {
+            case "discovery" -> PlanningPhase.DISCOVERY;
+            case "drafting" -> PlanningPhase.DRAFTING;
+            case "approval" -> PlanningPhase.APPROVAL;
+            default -> PlanningPhase.APPROVAL;
+        };
+    }
+
+    /** Returned from {@link #combinePlans} so the caller can drive downstream UX. */
+    public record CombineResult(UUID newPlanId, DiscoveryFacts mergedFacts) {}
+
     // --- BaseAdvisor implementation ---
 
     @Override
@@ -207,7 +418,7 @@ public class PlanningModeService implements BaseAdvisor {
         if (session == null) return request;
 
         // 1. Inject phase-specific system prompt
-        String phasePrompt = buildPhasePrompt(session);
+        String phasePrompt = buildPhasePrompt(session, sessionId);
         var messages = new ArrayList<>(request.prompt().getInstructions());
         messages.addFirst(new SystemMessage(phasePrompt));
 
@@ -261,7 +472,7 @@ public class PlanningModeService implements BaseAdvisor {
         };
     }
 
-    private String buildPhasePrompt(PlanningSession session) {
+    private String buildPhasePrompt(PlanningSession session, String sessionId) {
         return switch (session.phase()) {
             case DISCOVERY -> """
                     ## Planning Mode — Discovery Phase
@@ -303,23 +514,51 @@ public class PlanningModeService implements BaseAdvisor {
                     session.task(),
                     formatBullets(session.facts().knownFacts()),
                     formatBullets(session.facts().excludedOptions()));
-            case APPROVAL -> """
+            case APPROVAL -> {
+                String planStatus = resolvePlanStatus(sessionId);
+                yield """
                     ## Planning Mode — Approval Phase
                     Task: "%s"
 
-                    ### Hard constraints (authoritative — do not violate)
+                    ### Current plan state (authoritative — read from DB, not inferred)
+                    Plan status: %s
                     Known facts: %s
                     Excluded options: %s
 
                     ### Rules
-                    1. If the user requests changes, call `revisePlan` with the updated steps and a reason. Revisions MUST still respect Known facts and Excluded options.
-                    2. If the user approves, confirm the plan is saved and ready for execution.
-                    3. Do not start executing the plan. Wait for the user's decision.
+                    1. The Plan status line above is the SOURCE OF TRUTH. It reads straight from the database. Do NOT claim the plan is approved/active/saved unless it says so.
+                    2. Never self-declare approval. Only the user can approve — the system sets status to 'active' AFTER the user says a confirmation word.
+                    3. If the user requests changes, call `revisePlan` with updated steps and reason. Revisions MUST respect Known facts and Excluded options.
+                    4. If the plan is still 'draft', ask the user a clear yes/no question such as: "Czy wszystko jasne, mogę zatwierdzić plan?" / "Is everything clear — shall I approve the plan?" Then WAIT for their explicit confirmation word.
+                    5. If the plan is already 'active', confirm it is saved and summarise next steps. Never re-ask for approval.
+                    6. Do not start executing the plan. Wait for the user's explicit confirmation (tak / yes / potwierdzam / ok / …).
 
                     Respond in the user's language.""".formatted(
                     session.task(),
+                    planStatus,
                     formatBullets(session.facts().knownFacts()),
                     formatBullets(session.facts().excludedOptions()));
+            }
         };
+    }
+
+    /**
+     * Reads the most recent plan status for this session from the DB. Used to
+     * ground the LLM's APPROVAL prompt so it never claims a plan is approved
+     * when the DB still has it as draft.
+     */
+    private String resolvePlanStatus(String sessionId) {
+        try {
+            String status = jdbcTemplate.queryForObject(
+                    "SELECT status FROM kukuvaia.plans WHERE session_id = ? " +
+                            "ORDER BY created_at DESC LIMIT 1",
+                    String.class, sessionId);
+            return status != null ? status : "(no plan yet)";
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return "(no plan yet)";
+        } catch (Exception e) {
+            log.debug("resolvePlanStatus failed for sessionId={}: {}", sessionId, e.getMessage());
+            return "(unknown)";
+        }
     }
 }

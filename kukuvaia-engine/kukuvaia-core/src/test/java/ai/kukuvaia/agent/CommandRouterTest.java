@@ -33,7 +33,8 @@ class CommandRouterTest {
         var agentService = mock(AgentService.class);
         var skillRegistry = mock(SkillRegistry.class);
         var skillExecutor = mock(SkillExecutor.class);
-        router = new CommandRouter(registry, agentService, skillRegistry, skillExecutor);
+        var planningModeService = mock(PlanningModeService.class);
+        router = new CommandRouter(registry, agentService, skillRegistry, skillExecutor, planningModeService);
     }
 
     @Test

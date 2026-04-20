@@ -6,5 +6,6 @@ package ai.kukuvaia.output;
  */
 public sealed interface OutputBlock permits
         TextBlock, TableBlock, CodeBlock, ProgressBlock,
-        PlanBlock, VerificationBlock, MetadataBlock {
+        PlanBlock, PlanListBlock, VerificationBlock, MetadataBlock,
+        SpanEventBlock {
 }

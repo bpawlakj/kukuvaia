@@ -31,6 +31,10 @@ dependencies {
     api 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
 
+    // Observability — Micrometer API for custom metrics + AOP for @Tool timing
+    api 'io.micrometer:micrometer-core'
+    api 'org.springframework.boot:spring-boot-starter-aop'
+
     // LuaJ (sandboxed Lua scripting for tools and skills)
     implementation 'org.luaj:luaj-jse:3.0.1'
 

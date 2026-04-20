@@ -2,6 +2,7 @@ package ai.kukuvaia.memory.advisor;
 
 import ai.kukuvaia.memory.model.MemoryEntry;
 import ai.kukuvaia.memory.repository.SmartMemoryRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -30,7 +31,7 @@ class SmartMemoryAdvisorTest {
 
     @BeforeEach
     void setUp() {
-        advisor = new SmartMemoryAdvisor(smartMemoryRepository, embeddingService);
+        advisor = new SmartMemoryAdvisor(smartMemoryRepository, embeddingService, new SimpleMeterRegistry());
     }
 
     @Test

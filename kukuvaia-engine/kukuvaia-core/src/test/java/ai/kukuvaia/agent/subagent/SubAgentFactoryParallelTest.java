@@ -4,6 +4,7 @@ import ai.kukuvaia.agent.daemon.ExecutionContext;
 import ai.kukuvaia.config.ToolRegistryConfig;
 import ai.kukuvaia.provider.LlmProviderService;
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,7 +46,7 @@ class SubAgentFactoryParallelTest {
                         "You are a summarizer.", List.of(), "haiku", 1024, 1, 0.0, 10)
         ));
 
-        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor, toolRegistry, specLoader);
+        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor, toolRegistry, specLoader, new SimpleMeterRegistry());
     }
 
     @Test

@@ -12,6 +12,10 @@ java {
 dependencies {
     implementation project(':kukuvaia-core')
     implementation project(':kukuvaia-agents')
+
+    // Observability — Actuator + Prometheus scrape endpoint
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
 }
 
 tasks.named('test') {

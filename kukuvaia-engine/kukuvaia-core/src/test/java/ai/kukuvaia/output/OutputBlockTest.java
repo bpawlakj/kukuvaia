@@ -53,8 +53,10 @@ class OutputBlockTest {
             case CodeBlock c -> "code";
             case ProgressBlock p -> "progress";
             case PlanBlock p -> "plan";
+            case PlanListBlock pl -> "plan_list";
             case VerificationBlock v -> "verification";
             case MetadataBlock m -> "metadata";
+            case SpanEventBlock s -> "span_event";
         };
         assertThat(type).isEqualTo("text");
     }

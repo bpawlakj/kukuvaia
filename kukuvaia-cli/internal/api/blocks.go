@@ -54,6 +54,35 @@ type PlanBlock struct {
 
 func (PlanBlock) blockType() string { return "plan" }
 
+// PlanLinkSummary mirrors the Java-side summary attached to list entries.
+type PlanLinkSummary struct {
+	ParentID   string `json:"parentId"`
+	Relation   string `json:"relation"`
+	ParentName string `json:"parentName"`
+}
+
+// PlanEntry mirrors the server-side PlanEntry record.
+type PlanEntry struct {
+	ID          string            `json:"id"`
+	SessionID   string            `json:"sessionId"`
+	UserID      string            `json:"userId"`
+	Name        string            `json:"name"`
+	TaskPreview string            `json:"taskPreview"`
+	Status      string            `json:"status"`
+	Phase       string            `json:"phase"`
+	CreatedAt   string            `json:"createdAt"`
+	UpdatedAt   string            `json:"updatedAt"`
+	Parents     []PlanLinkSummary `json:"parents"`
+}
+
+// PlanListBlock — P21 interactive registry. CLI auto-opens the picker on receipt.
+type PlanListBlock struct {
+	Plans        []PlanEntry `json:"plans"`
+	StatusFilter string      `json:"statusFilter"`
+}
+
+func (PlanListBlock) blockType() string { return "plan_list" }
+
 // VerificationBlock — validation results with pass/fail.
 type VerificationBlock struct {
 	Path   string   `json:"path"`
@@ -71,6 +100,19 @@ type MetadataBlock struct {
 
 func (MetadataBlock) blockType() string { return "metadata" }
 
+// SpanEventBlock — OTel-style span lifecycle event for the live activity tracker.
+// Phase is one of "start", "delta", "end".
+type SpanEventBlock struct {
+	SpanID       string         `json:"spanId"`
+	ParentSpanID string         `json:"parentSpanId"`
+	Name         string         `json:"name"`
+	Phase        string         `json:"phase"`
+	Attributes   map[string]any `json:"attributes"`
+	Timestamp    string         `json:"timestamp"`
+}
+
+func (SpanEventBlock) blockType() string { return "span_event" }
+
 // ParseOutputBlock infers the OutputBlock type from JSON field presence.
 // Field detection order matters — more specific fields checked first,
 // TextBlock is the fallback since "content" appears in both Text and Code.
@@ -81,6 +123,9 @@ func ParseOutputBlock(data []byte) (OutputBlock, error) {
 	}
 
 	switch {
+	case has(raw, "spanId"):
+		var b SpanEventBlock
+		return b, json.Unmarshal(data, &b)
 	case has(raw, "headers"):
 		var b TableBlock
 		return b, json.Unmarshal(data, &b)
@@ -89,6 +134,9 @@ func ParseOutputBlock(data []byte) (OutputBlock, error) {
 		return b, json.Unmarshal(data, &b)
 	case has(raw, "total"):
 		var b ProgressBlock
+		return b, json.Unmarshal(data, &b)
+	case has(raw, "plans"):
+		var b PlanListBlock
 		return b, json.Unmarshal(data, &b)
 	case has(raw, "steps"):
 		var b PlanBlock

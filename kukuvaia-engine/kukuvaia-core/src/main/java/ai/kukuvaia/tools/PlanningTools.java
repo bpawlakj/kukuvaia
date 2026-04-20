@@ -44,6 +44,11 @@ public class PlanningTools {
         USER_ID.remove();
     }
 
+    /** Public thread-local accessor for observability hooks that run inside the advisor chain. */
+    public static String getCurrentSessionId() {
+        return SESSION_ID.get();
+    }
+
     private String currentSessionId() { return SESSION_ID.get() != null ? SESSION_ID.get() : "unknown"; }
     private String currentUserId() { return USER_ID.get() != null ? USER_ID.get() : "unknown"; }
 

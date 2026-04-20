@@ -7,6 +7,7 @@ import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.transformers.TransformersEmbeddingModel;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -21,13 +22,28 @@ import java.util.concurrent.Executors;
 public class MemoryModuleConfig {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryModuleConfig.class);
-    private static final int DEFAULT_MAX_MESSAGES = 20;
+
+    /**
+     * Sliding window of last N chat messages included in every LLM request.
+     *
+     * Sized for modern LLMs — Mistral Small 2603 has 262K context, Claude
+     * Sonnet 4.5 has 200K, Elephant Alpha 256K. At typical ~300 tokens per
+     * message, 100 messages ≈ 30K tokens — well within all supported models
+     * while still providing meaningful conversation continuity.
+     *
+     * Override via env var or application property:
+     *   KUKUVAIA_CHAT_MEMORY_MAX_MESSAGES=200
+     *   kukuvaia.chat.memory.max-messages=200
+     */
+    @Value("${kukuvaia.chat.memory.max-messages:100}")
+    private int maxMessages;
 
     @Bean
     ChatMemory chatMemory(ChatMemoryRepository chatMemoryRepository) {
+        log.info("ChatMemory initialized with maxMessages={}", maxMessages);
         return MessageWindowChatMemory.builder()
                 .chatMemoryRepository(chatMemoryRepository)
-                .maxMessages(DEFAULT_MAX_MESSAGES)
+                .maxMessages(maxMessages)
                 .build();
     }
 

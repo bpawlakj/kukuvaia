@@ -20,7 +20,7 @@ Located in `.maister/docs/project/`
 Project purpose, current state, goals, and evolution history. Kukuvaia is an extensible conversational AI agent platform with secure multi-provider LLM architecture, targeting production readiness with expanded test coverage, CI/CD, observability, and web frontend.
 
 ### Roadmap (`project/roadmap.md`)
-Development priorities organized by urgency. High priority: test coverage expansion (80%+ security-critical), CI/CD automation, API contract documentation, provider data classification warnings. Medium priority: observability, daemon persona isolation, structured error codes, schema-level PG user separation. Future: web frontend, distributed deployment, external MCP servers.
+Development priorities grouped by milestone. Current state (2026-04-19): engine + CLI shipped with observability (P01 Stage A+B), CLI activity tracker with inline snapshots (P01.1 Stage C+D), planning discovery state with ambiguity handling (P13). Pending MVP blockers: Docker Compose, LICENSE/CONTRIBUTING, CI. Drafted plans for future milestones: P14 tiered context, P15 honest agent (4 pillars), P16 stepped reasoning (opt-in, feature-flagged). Includes plan→milestone mapping table with shipped/draft status and critical-path notes.
 
 ### Tech Stack (`project/tech-stack.md`)
 Technology choices and rationale. Java 21+ (core, memory, app) and Kotlin 2.1.20 (agents/Embabel) with Spring Boot 3.4.4 and Spring AI 1.1.0 for the engine. Go 1.22+ with Charm stack for the CLI. Embabel Agent Framework 0.3.4 for GOAP agent orchestration. PostgreSQL + pgvector (sessions, memory, conversations) and MongoDB (read-only legacy). JUnit 5, AssertJ, Mockito for testing. Multi-provider LLM via GitHub Copilot (OAuth) and SmartGate (JWT).

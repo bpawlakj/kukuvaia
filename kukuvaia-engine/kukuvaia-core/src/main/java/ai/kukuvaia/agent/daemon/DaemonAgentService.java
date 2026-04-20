@@ -2,6 +2,9 @@ package ai.kukuvaia.agent.daemon;
 
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.daemon.DaemonTaskResult.DaemonTaskStatus;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,17 +29,20 @@ public class DaemonAgentService {
     private final DaemonScheduleGuard scheduleGuard;
     private final NotificationSanitizer notificationSanitizer;
     private final JdbcTemplate jdbc;
+    private final MeterRegistry meterRegistry;
 
     public DaemonAgentService(SubAgentFactory subAgentFactory,
                                DaemonBudgetGuard budgetGuard,
                                DaemonScheduleGuard scheduleGuard,
                                NotificationSanitizer notificationSanitizer,
-                               JdbcTemplate jdbc) {
+                               JdbcTemplate jdbc,
+                               MeterRegistry meterRegistry) {
         this.subAgentFactory = subAgentFactory;
         this.budgetGuard = budgetGuard;
         this.scheduleGuard = scheduleGuard;
         this.notificationSanitizer = notificationSanitizer;
         this.jdbc = jdbc;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -90,6 +96,7 @@ public class DaemonAgentService {
             log.info("Daemon task '{}' completed in {}ms (task #{})",
                     taskName, durationMs, taskId);
 
+            recordMetrics(taskName, specialistType, "completed", durationMs);
             return taskResult;
 
         } catch (Exception e) {
@@ -100,6 +107,7 @@ public class DaemonAgentService {
             log.error("Daemon task '{}' failed after {}ms: {}",
                     taskName, durationMs, e.getMessage());
 
+            recordMetrics(taskName, specialistType, "failed", durationMs);
             return new DaemonTaskResult(
                     taskId, taskName, specialistType,
                     providerOverride != null ? providerOverride : "daemon-default",
@@ -109,6 +117,20 @@ public class DaemonAgentService {
         } finally {
             scheduleGuard.release(taskName);
         }
+    }
+
+    private void recordMetrics(String taskName, String specialist, String status, long durationMs) {
+        Timer.builder("kukuvaia.daemon.task.duration")
+                .tag("task", taskName)
+                .tag("specialist", specialist)
+                .tag("status", status)
+                .register(meterRegistry)
+                .record(Duration.ofMillis(durationMs));
+        Counter.builder("kukuvaia.daemon.task.total")
+                .tag("task", taskName)
+                .tag("status", status)
+                .register(meterRegistry)
+                .increment();
     }
 
     private long insertTask(String name, String specialist, String prompt, String trigger) {

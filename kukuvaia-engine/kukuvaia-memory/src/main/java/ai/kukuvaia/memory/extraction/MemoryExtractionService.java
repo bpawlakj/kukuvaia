@@ -6,6 +6,9 @@ import ai.kukuvaia.memory.repository.SessionRepository;
 import ai.kukuvaia.memory.repository.SmartMemoryRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -38,18 +41,21 @@ public class MemoryExtractionService {
     private final SmartMemoryRepository memoryRepository;
     private final SessionRepository sessionRepository;
     private final EmbeddingService embeddingService;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper;
 
     public MemoryExtractionService(ChatModel chatModel,
                                     ChatMemoryRepository chatMemoryRepository,
                                     SmartMemoryRepository memoryRepository,
                                     SessionRepository sessionRepository,
-                                    EmbeddingService embeddingService) {
+                                    EmbeddingService embeddingService,
+                                    MeterRegistry meterRegistry) {
         this.chatModel = chatModel;
         this.chatMemoryRepository = chatMemoryRepository;
         this.memoryRepository = memoryRepository;
         this.sessionRepository = sessionRepository;
         this.embeddingService = embeddingService;
+        this.meterRegistry = meterRegistry;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -58,8 +64,9 @@ public class MemoryExtractionService {
      * Called asynchronously after each chat turn.
      */
     public void extract(String userId, String sessionId) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        String status = "success";
         try {
-            // Get conversation and cursor
             var allMessages = chatMemoryRepository.findByConversationId(sessionId);
             int cursor = sessionRepository.getExtractionCursor(sessionId);
             int total = allMessages.size();
@@ -67,46 +74,48 @@ public class MemoryExtractionService {
             if (total - cursor < MIN_NEW_MESSAGES) {
                 log.debug("Extraction skipped: only {} new messages (cursor={}, total={})",
                         total - cursor, cursor, total);
+                status = "skipped";
                 return;
             }
 
-            // Get new messages since cursor
             var newMessages = allMessages.subList(Math.max(0, cursor), total);
             String transcript = formatTranscript(newMessages);
 
-            // Get existing memories for dedup
             var existing = memoryRepository.findByUser(userId);
             String existingJson = formatExistingMemories(existing);
 
-            // Build extraction prompt
             String prompt = buildExtractionPrompt(transcript, existingJson);
 
-            // Call LLM for extraction
             log.info("Memory extraction: sessionId={}, newMessages={}, existingMemories={}",
                     sessionId, newMessages.size(), existing.size());
 
             var response = chatModel.call(new Prompt(prompt));
             String content = response.getResult().getOutput().getText();
 
-            // Parse extracted facts
             var facts = parseExtractedFacts(content);
 
             if (facts.isEmpty()) {
                 log.debug("No new facts extracted from session {}", sessionId);
             } else {
-                // Save each extracted fact
                 for (var fact : facts) {
                     saveFact(userId, sessionId, fact);
+                    Counter.builder("kukuvaia.memory.extraction.facts")
+                            .tag("category", fact.getOrDefault("category", "unknown"))
+                            .register(meterRegistry)
+                            .increment();
                 }
                 log.info("Extracted {} memories from session {} for user {}", facts.size(), sessionId, userId);
             }
 
-            // Advance cursor
             sessionRepository.updateExtractionCursor(sessionId, total);
 
         } catch (Exception e) {
-            // Never crash — log and skip. Cursor stays at old position, retry next turn.
+            status = "error";
             log.warn("Memory extraction failed for session {}: {}", sessionId, e.getMessage());
+        } finally {
+            sample.stop(Timer.builder("kukuvaia.memory.extraction.duration")
+                    .tag("status", status)
+                    .register(meterRegistry));
         }
     }
 

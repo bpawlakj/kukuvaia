@@ -41,17 +41,20 @@ public class SubAgentFactory {
     private final ToolRegistryConfig toolRegistry;
     private final Map<String, SubAgentSpec> specs; // loaded from YAML at startup
     private final ExecutorService workerExecutor;
+    private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
     public SubAgentFactory(LlmProviderService providerService,
                             SubAgentGuard guard,
                             ToolResultSanitizingAdvisor toolResultAdvisor,
                             @Lazy ToolRegistryConfig toolRegistry,
-                            SubAgentSpecLoader specLoader) {
+                            SubAgentSpecLoader specLoader,
+                            io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         this.providerService = providerService;
         this.guard = guard;
         this.toolResultAdvisor = toolResultAdvisor;
         this.toolRegistry = toolRegistry;
         this.specs = specLoader.loadAll();
+        this.meterRegistry = meterRegistry;
         this.workerExecutor = Executors.newFixedThreadPool(
                 guard.maxParallelWorkers(),
                 Thread.ofVirtual().name("kukuvaia-worker-", 0).factory());
@@ -129,6 +132,9 @@ public class SubAgentFactory {
 
         var chatOptions = buildSubAgentOptions(spec);
 
+        io.micrometer.core.instrument.Timer.Sample sample =
+                io.micrometer.core.instrument.Timer.start(meterRegistry);
+        String status = "success";
         try {
             return CompletableFuture.supplyAsync(() ->
                     subAgent.prompt()
@@ -143,11 +149,20 @@ public class SubAgentFactory {
             ).get(timeoutSeconds, TimeUnit.SECONDS);
 
         } catch (TimeoutException e) {
+            status = "timeout";
             log.error("Sub-agent '{}' timed out after {}s", specialistType, timeoutSeconds);
             throw new SubAgentTimeoutException(specialistType, timeoutSeconds);
         } catch (Exception e) {
+            status = "error";
             if (e.getCause() instanceof RuntimeException re) throw re;
             throw new RuntimeException("Sub-agent execution failed: " + e.getMessage(), e);
+        } finally {
+            sample.stop(io.micrometer.core.instrument.Timer.builder("kukuvaia.subagent.duration")
+                    .tag("specialist", specialistType)
+                    .tag("provider", resolvedProvider)
+                    .tag("context", context.name())
+                    .tag("status", status)
+                    .register(meterRegistry));
         }
     }
 

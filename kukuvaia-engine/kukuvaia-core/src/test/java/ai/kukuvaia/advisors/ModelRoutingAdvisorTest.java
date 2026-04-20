@@ -1,13 +1,18 @@
 package ai.kukuvaia.advisors;
 
+import ai.kukuvaia.agent.PlanningModeService;
+import ai.kukuvaia.agent.SessionEscalationService;
 import ai.kukuvaia.provider.registry.ChatModelCache;
+import ai.kukuvaia.provider.registry.ComplexityMappingService;
 import ai.kukuvaia.provider.registry.ModelRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,12 +22,20 @@ class ModelRoutingAdvisorTest {
 
     @Mock private ChatModelCache chatModelCache;
     @Mock private ModelRepository modelRepository;
+    @Mock private PlanningModeService planningModeService;
+    @Mock private JdbcTemplate jdbcTemplate;
+    @Mock private ComplexityDetector complexityDetector;
+    @Mock private ComplexityMappingService complexityMappingService;
+    @Mock private LlmComplexityClassifier llmComplexityClassifier;
 
     private ModelRoutingAdvisor advisor;
 
     @BeforeEach
     void setUp() {
-        advisor = new ModelRoutingAdvisor(chatModelCache, modelRepository);
+        advisor = new ModelRoutingAdvisor(chatModelCache, modelRepository,
+                new TaskClassifier(), planningModeService, jdbcTemplate,
+                complexityDetector, complexityMappingService,
+                new SessionEscalationService(), new SimpleMeterRegistry());
     }
 
     // --- FAST (greeting → worker) ---

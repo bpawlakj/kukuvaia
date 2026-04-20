@@ -84,6 +84,7 @@ func (m *Model) handleCommand(input string) (bool, tea.Cmd) {
   /plan <task>  — start planning mode (discovery → drafting → approval)
   /plan status  — show current planning phase
   /plan cancel  — cancel planning mode
+  /escalate     — route next message to advisor-tier model (one-shot)
   /new          — start a new session
   /session      — show current session info
   /sessions     — browse and switch sessions (↑↓ navigate)
@@ -92,8 +93,15 @@ func (m *Model) handleCommand(input string) (bool, tea.Cmd) {
   /help         — show this help
   /quit         — exit
 
+Keybindings:
+  ctrl+p        — toggle planning mode (exit planning, or prefill /plan prompt)
+  ctrl+o        — toggle activity tracker expanded view
+  ctrl+l        — clear chat
+  ctrl+c        — quit
+  pgup/pgdn/home/end — scroll chat
+
 Planning flow: /plan <task> → answer questions → "gotowe" → review plan → "tak"
-Scrolling: pgup/pgdn, home/end
+Input box border turns yellow while planning is active.
 All other /commands are forwarded to the server.`
 		m.messages = append(m.messages, message{
 			role:   "assistant",
@@ -160,32 +168,11 @@ func truncateForDisplay(id string) string {
 }
 
 // sendPlan sends /plan command via chat SSE (server routes it to planning prompt).
+// Uses the same streaming cmd chain as sendChat so SpanEventBlocks route to the
+// activity tracker rather than leaking into the chat history as "[unknown block]".
 func (m Model) sendPlan(task string) tea.Cmd {
-	return func() tea.Msg {
-		blocks, errs := m.client.Chat(m.session, "/plan "+task)
-
-		var received []api.OutputBlock
-		var lastErr error
-		for blocks != nil || errs != nil {
-			select {
-			case block, ok := <-blocks:
-				if !ok {
-					blocks = nil
-					continue
-				}
-				received = append(received, block)
-			case err, ok := <-errs:
-				if !ok {
-					errs = nil
-					continue
-				}
-				if err != nil {
-					lastErr = err
-				}
-			}
-		}
-		return chatResultMsg{blocks: received, err: lastErr}
-	}
+	blocks, errs := m.client.Chat(m.session, "/plan "+task)
+	return readNextChatBlock(blocks, errs, nil)
 }
 
 // executeRemoteCommand sends a slash command to the server.

@@ -103,6 +103,28 @@ func (c *Client) DeleteSession(id string) error {
 	return nil
 }
 
+// ListPlans fetches the user's plan registry for the picker. Filter is one of
+// "" (all), "draft", "active", "completed", "abandoned".
+func (c *Client) ListPlans(filter string) ([]PlanEntry, error) {
+	url := c.BaseURL + "/api/plans"
+	if filter != "" {
+		url += "?status=" + filter
+	}
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("list plans: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list plans: HTTP %d", resp.StatusCode)
+	}
+	var plans []PlanEntry
+	if err := json.NewDecoder(resp.Body).Decode(&plans); err != nil {
+		return nil, fmt.Errorf("list plans: decode: %w", err)
+	}
+	return plans, nil
+}
+
 // ExecuteCommand sends a slash command to the server and returns the response blocks.
 // Commands return a JSON array (not SSE).
 func (c *Client) ExecuteCommand(cmd, args, sessionID string) ([]OutputBlock, error) {

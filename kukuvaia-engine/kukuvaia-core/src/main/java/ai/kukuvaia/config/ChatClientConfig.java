@@ -2,6 +2,7 @@ package ai.kukuvaia.config;
 
 import ai.kukuvaia.advisors.LoopDetectionAdvisor;
 import ai.kukuvaia.advisors.ModelRoutingAdvisor;
+import ai.kukuvaia.advisors.SessionContextAdvisor;
 import ai.kukuvaia.agent.PlanningModeService;
 import ai.kukuvaia.harness.HarnessAdvisor;
 import ai.kukuvaia.memory.advisor.SmartMemoryAdvisor;
@@ -40,9 +41,10 @@ public class ChatClientConfig {
 
     @Bean
     ToolCallbackProvider javaToolCallbackProvider(MemoryTools memoryTools, PlanningTools planningTools,
-                                                  DelegationTools delegationTools) {
+                                                  DelegationTools delegationTools,
+                                                  ai.kukuvaia.tools.PlanRegistryTools planRegistryTools) {
         return MethodToolCallbackProvider.builder()
-                .toolObjects(memoryTools, planningTools, delegationTools)
+                .toolObjects(memoryTools, planningTools, delegationTools, planRegistryTools)
                 .build();
     }
 
@@ -57,6 +59,7 @@ public class ChatClientConfig {
                           DataMaskingAdvisor dataMaskingAdvisor,
                           HarnessAdvisor harnessAdvisor,
                           PlanningModeService planningModeService,
+                          SessionContextAdvisor sessionContextAdvisor,
                           ToolCallingManager toolCallingManager,
                           Collection<ToolCallbackProvider> toolCallbackProviders) {
 
@@ -68,6 +71,7 @@ public class ChatClientConfig {
                         dataMaskingAdvisor,
                         harnessAdvisor,
                         planningModeService,
+                        sessionContextAdvisor,
                         toolResultSanitizingAdvisor,
                         smartMemoryAdvisor,
                         MessageChatMemoryAdvisor.builder(chatMemory).build(),

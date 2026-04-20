@@ -1,162 +1,276 @@
 # P08: Prompt Cache Optimization — Cache-Aware Prompt Construction
 
 **Created**: 2026-04-10
-**Status**: Draft
+**Updated**: 2026-04-19 — realigned to current advisor chain, role strategy, provider matrix
+**Status**: Draft — ready for implementation
 **Module**: kukuvaia-core, kukuvaia-memory
-**Depends on**: ChatClientConfig, SmartMemoryAdvisor, PersonaService, SystemPromptBuilder
+**Depends on**: ChatClientConfig, SmartMemoryAdvisor, PersonaService, SystemPromptBuilder (currently orphan — see §SystemPromptBuilder), SessionContextAdvisor (added 2026-04-19), PlanningModeService
+
+---
+
+## Role strategy — foundational decision
+
+**Supervisor MUST be a cache-supporting model.** The cost and latency of every turn is dominated by the supervisor's full system prompt (~30K tokens with 100-message history). Without caching, each turn re-processes this prefix — unacceptable at production volume.
+
+Consequences:
+
+- **Supervisor-tier model** (role `supervisor` in `kukuvaia.model_roles`): Claude Sonnet 4.5, GPT-4.1, Elephant Alpha, or any model with prefix caching. **Must** advertise cache support.
+- **Worker-tier model** (role `worker`): free to be a non-caching small/fast model like `mistralai/mistral-small-2603`. Workers handle narrow delegated subtasks with small, ephemeral prompts where cache payoff is minimal.
+- **Advisor-tier model** (role `advisor`, ESCALATE path): cache support preferred but optional — advisor calls are rare and context is smaller.
+
+This plan optimises the supervisor prompt structure. Worker prompts are left unchanged: they are short-lived single-turn interactions where caching overhead exceeds benefit.
+
+## Cache activation — per-model flag (NOT hardcoded)
+
+**Decision**: each model in `kukuvaia.models` gets a `cache_capable BOOLEAN` column, set by the operator when the model is registered. The entire P08 pipeline (prompt ordering breakpoints, interceptor markers, monitoring) is gated by this flag per-request at runtime.
+
+Why this over a hardcoded allow-list:
+
+1. **New models appear faster than we can hardcode** — Gemini 3.x, Elephant Alpha, DeepSeek V4 all launched recently. Hardcoded list rots.
+2. **Provider nuances** — same model via different providers may or may not cache (OpenRouter passthrough depends on the underlying provider's configuration).
+3. **Operator knows the facts** — when registering a model they have already tested it or read the provider docs. That knowledge belongs in the registration step, not in engine code.
+4. **Rollback at model granularity** — if a model's caching turns out to be flaky, flip `cache_capable=false` in one row and everything reverts for that model only, no redeploy.
+
+The `CacheConfig` global switch (`kukuvaia.cache.enabled`) becomes the master kill switch; `cache_capable` on each model is the fine-grained per-model gate. Both must be true for P08 logic to fire.
 
 ---
 
 ## Problem
 
-LLM providers implement prompt caching (Anthropic's cache_control / prefix caching, OpenAI's automatic prefix caching) that dramatically reduces cost and latency for repeated prompt prefixes. Anthropic charges 90% less for cached input tokens and serves them ~5x faster. OpenAI provides 50% discount on cached tokens.
+LLM providers implement prompt caching (Anthropic's `cache_control` / prefix caching, OpenAI's automatic prefix caching, DeepSeek's context cache) that reduces cost and latency for repeated prompt prefixes. Anthropic charges 90% less for cached input tokens and serves them ~5× faster. OpenAI provides 50% discount on cached tokens.
 
 Kukuvaia's current prompt construction is cache-unaware:
 
-- Advisor ordering was designed for correctness, not cache efficiency
-- Dynamic content (memories, conversation history) mixes with static content (persona, security rules, planning instructions) in unpredictable order
-- No cache_control markers are sent to Anthropic models
-- No monitoring of cache hit rates
-- The system potentially wastes significant cost by sending the same system prompt prefix across conversations without benefiting from caching
+- **Advisor ordering** was designed for correctness, not cache efficiency.
+- **Dynamic content** (memories, session context, conversation history) mixes with **static content** (persona, security rules, planning instructions) in an order that breaks prefix caching.
+- **No `cache_control` markers** are sent for Anthropic models.
+- **No monitoring** of cache hit rates exists.
+- **`SystemPromptBuilder` is orphan** — the class exists but is never invoked by any advisor or service. Its `PLANNING_INSTRUCTIONS` and `VERIFICATION_MANDATE` constants are dead code.
 
-For a typical conversation with a 4K-token system prompt, prompt caching could save $0.001-0.01 per request. At scale (1000+ requests/day), this compounds to meaningful cost reduction.
-
----
-
-## Current State
-
-### Prompt construction order (actual token sequence sent to LLM)
-
-The system prompt is assembled by multiple advisors in chain order:
-
-```
-1. PersonaService.getActivePersona(sessionId).systemPrompt()    [set by AgentService]
-   └── "You are Kukuvaia, an intelligent AI assistant..."
-
-2. ToolResultSanitizingAdvisor.before() [HIGHEST_PRECEDENCE + 1]
-   └── augmentSystemMessage(SAFETY_SUFFIX)
-   └── "--- SECURITY BOUNDARY (always enforced): ..."
-
-3. SmartMemoryAdvisor.before() [HIGHEST_PRECEDENCE + 5]
-   └── augmentSystemMessage(memoryBlock)
-   └── "--- PERSISTENT MEMORY (from previous sessions) ---"
-
-4. TokenBudgetAdvisor.before() [HIGHEST_PRECEDENCE + 20]
-   └── augmentSystemMessage(BUDGET_WARNING)   [only when usage > 80%]
-
-5. MessageChatMemoryAdvisor [default order]
-   └── Appends conversation history messages
-```
-
-Note: `SystemPromptBuilder` assembles PLANNING_INSTRUCTIONS + VERIFICATION_MANDATE + STATIC_BOUNDARY + persona + rules + skill, but this is currently only used via `AgentService.chat()` calling `persona.systemPrompt()`. The builder itself is not wired as an advisor.
-
-### Why this is cache-hostile
-
-```
-Token position:  [persona_prompt | SAFETY_SUFFIX | memories | budget_warning | history | user_msg]
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                  STATIC (same across requests)    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                                                   DYNAMIC (changes every request)
-```
-
-The static prefix IS stable across requests within a session, which is good. But:
-
-1. **No cache_control markers** — Anthropic needs explicit `cache_control: {type: "ephemeral"}` breakpoints
-2. **Memories change per-request** — semantic retrieval returns different memories per query, breaking cache after the static prefix
-3. **No monitoring** — we do not know current cache hit rate (response headers contain this info)
-4. **SystemPromptBuilder not used in advisor chain** — the STATIC_BOUNDARY marker exists but is not leveraged for cache hints
+At production volume (100+ turns/day, Claude Sonnet), the status quo wastes $5–$10/day in avoidable input token costs.
 
 ---
 
-## Architecture
+## Current state (2026-04-19)
 
-### Optimal prompt ordering for cache hits
+### Advisor chain order
+
+Verified from `ChatClientConfig.chatClient()`. Lower `@Order` value = runs earlier.
+
+| Order | Advisor | Effect on prompt |
+|-------|---------|------------------|
+| `HP + 0` | `ProviderAuditLog` | None (logs only, stores Timer.Sample in context) |
+| `HP + 5` | `SmartMemoryAdvisor` | Appends memory block via `augmentSystemMessage` |
+| `HP + 12` | `ModelRoutingAdvisor` | Swaps model, does NOT modify system prompt text |
+| `HP + 13` | `LoopDetectionAdvisor` | None on `before()` path |
+| `HP + 15` | `PlanningModeService` | Injects phase-specific prompt + filters tools (DISCOVERY/DRAFTING/APPROVAL) |
+| `HP + 20` | `SessionContextAdvisor` (added 2026-04-19) | Injects plans + commitments block |
+| `default` | `DataMaskingAdvisor` | Masks PII in-place, does not change prompt structure |
+| `default` | `HarnessAdvisor` | Injects user rules from `.kukuvaia/rules/` |
+| `default` | `ToolResultSanitizingAdvisor` | Appends `SAFETY_SUFFIX` (static) |
+| `default` | `MessageChatMemoryAdvisor` | Prepends conversation history (last N messages, N=100) |
+| `default` | `ToolCallAdvisor` | Runs tool loop, feeds tool responses back |
+
+### Why current order is cache-hostile
+
+Because advisors use `augmentSystemMessage` (which inserts at the END of existing system message) and run in decreasing-order priority, the final token stream looks roughly:
+
+```
+[persona_prompt]                          ← STATIC
+[MessageChatMemory injects history]       ← DYNAMIC
+[ToolResultSanitizing SAFETY_SUFFIX]      ← STATIC
+[HarnessAdvisor user rules]               ← SEMI-STATIC
+[SessionContextAdvisor plans+commitments] ← DYNAMIC per turn
+[PlanningModeService phase prompt]        ← DYNAMIC per phase
+[SmartMemoryAdvisor memories]             ← DYNAMIC per query (top-K semantic)
+[user_message]                            ← DYNAMIC
+```
+
+The STATIC content is NOT at the start → prefix cache cannot lock onto it.
+
+### Target ordering
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  ZONE 1: STATIC PREFIX (identical across all sessions)  │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │ Planning instructions (SystemPromptBuilder)     │    │
-│  │ Verification mandate (SystemPromptBuilder)      │    │
-│  │ Security boundary (ToolResultSanitizingAdvisor) │    │
-│  └─────────────────────────────────────────────────┘    │
+│  ZONE 1: STATIC PREFIX — identical across all sessions  │
+│    - Planning instructions (SystemPromptBuilder)        │
+│    - Verification mandate (SystemPromptBuilder)         │
+│    - Security boundary (ToolResultSanitizingAdvisor)    │
 │  ↑ cache_control breakpoint 1                           │
 ├─────────────────────────────────────────────────────────┤
-│  ZONE 2: SEMI-STATIC (changes per persona/session)     │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │ Persona system prompt                           │    │
-│  │ User rules (.kukuvaia/rules/)                   │    │
-│  │ Active skill (if any)                           │    │
-│  └─────────────────────────────────────────────────┘    │
+│  ZONE 2: SEMI-STATIC — per persona/installation         │
+│    - Persona system prompt                              │
+│    - User rules (.kukuvaia/rules/) via HarnessAdvisor   │
+│    - Active skill (if any)                              │
 │  ↑ cache_control breakpoint 2                           │
 ├─────────────────────────────────────────────────────────┤
-│  ZONE 3: SEMI-DYNAMIC (changes infrequently)           │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │ Persistent memories (SmartMemoryAdvisor)        │    │
-│  │ Budget warning (TokenBudgetAdvisor)             │    │
-│  └─────────────────────────────────────────────────┘    │
-│  ↑ cache_control breakpoint 3 (optional)                │
+│  ZONE 3: SEMI-DYNAMIC — stable within session window    │
+│    - Persistent memories (SmartMemoryAdvisor, TTL-cached)│
+│    - Session context: plans+commitments                 │
+│      (SessionContextAdvisor, TTL-cached)                │
+│    - Planning phase prompt (if in planning mode)        │
+│  ↑ cache_control breakpoint 3 (optional, Anthropic only)│
 ├─────────────────────────────────────────────────────────┤
-│  ZONE 4: DYNAMIC (changes every request)               │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │ Conversation history (MessageChatMemoryAdvisor) │    │
-│  │ User message                                    │    │
-│  └─────────────────────────────────────────────────┘    │
+│  ZONE 4: DYNAMIC — changes every turn                   │
+│    - Conversation history (MessageChatMemoryAdvisor)    │
+│    - User message                                       │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Key insight**: The LLM sees the system prompt as a single token stream. Cache hits happen on the longest matching prefix. By ordering static content first, we maximize the cacheable prefix length.
+---
 
-### Token budget allocation
+## SystemPromptBuilder — current orphan resolution
 
-| Zone | Typical size | % of context | Cache behavior |
-|------|-------------|-------------|----------------|
-| Zone 1 (static) | 300-500 tokens | 3-5% | Always cached after first request |
-| Zone 2 (semi-static) | 200-2000 tokens | 2-20% | Cached within same persona session |
-| Zone 3 (semi-dynamic) | 100-800 tokens | 1-8% | Cached when same memories retrieved |
-| Zone 4 (dynamic) | 500-50000 tokens | 70-90% | Never cached |
+**Finding**: `SystemPromptBuilder` class exists (`agent/SystemPromptBuilder.java`) with `PLANNING_INSTRUCTIONS`, `VERIFICATION_MANDATE`, `STATIC_BOUNDARY` constants, but is NOT referenced by any other code. `AgentService.chat()` passes `persona.systemPrompt()` directly to `ChatClient.prompt().system(...)`.
+
+**Options**:
+
+1. **Inline the constants** into `CacheAwarePromptAdvisor` (new class from Step 1). Simpler. Deletes `SystemPromptBuilder` entirely.
+2. **Keep SystemPromptBuilder as utility**, make constants `public`, and call it from `CacheAwarePromptAdvisor`. Preserves separation of concerns for future rules loader integration.
+
+**Decision (this plan)**: Option 2. Keeps `RulesLoader` integration point intact. `SystemPromptBuilder.build()` becomes an internal helper; new public methods `staticPrefixTokens()`, `semiStaticSection(persona, skill)` split the assembly into zones.
 
 ---
 
-## Implementation
+## Provider compatibility matrix
 
-### Step 1: CacheAwarePromptAdvisor — consolidates system prompt construction
+| Provider | Automatic prefix cache | Explicit `cache_control` | Monitoring field | Discount |
+|----------|------------------------|--------------------------|------------------|----------|
+| OpenAI (direct) | ✅ yes | — | `usage.prompt_tokens_details.cached_tokens` | 50% |
+| Anthropic (direct) | ❌ | ✅ required | `usage.cache_read_input_tokens`, `usage.cache_creation_input_tokens` | 90% (read), 125% (creation) |
+| Anthropic via Spring AI `OpenAiApi` | — | ❌ **not supported** — needs RestClient interceptor | See below | — |
+| OpenRouter (passthrough) | Depends on underlying model | Depends on underlying model | Exposes provider fields | Variable |
+| Elephant Alpha (OpenRouter) | ✅ (provider page) | Likely ignored | Via `prompt_tokens_details` | Provider-defined |
+| DeepSeek | ✅ (automatic context cache) | — | `usage.prompt_cache_hit_tokens` | 90% |
+| Mistral Small 2603 | ❌ (no cache at all) | — | — | 0% |
+| Claude Sonnet 4.5 | — | ✅ required | See Anthropic | 90% |
+| SmartGate (LiteLLM proxy) | **Unknown — probe required** | **Unknown** | **Unknown** | — |
+
+### Spring AI 1.1 verified support
+
+Confirmed by unpacking `spring-ai-openai:1.1.0`:
+
+- ✅ `OpenAiApi.Usage.PromptTokensDetails.cachedTokens` exists — we can read cached-token counts from response
+- ❌ No `cache_control` field on `OpenAiApi.ChatCompletionMessage` — Anthropic breakpoints require a RestClient interceptor or custom message JSON
+
+### Implication for this plan
+
+- **Step 3 (cache_control markers)** is **not a no-op rewrite** — it is a genuine RestClient interceptor task. See §Step 3 below.
+- **Step 4 (monitoring)** works out of the box via Spring AI — just read `getMetadata().getUsage().getPromptTokensDetails().getCachedTokens()`.
+- **Supervisor model selection** becomes a prerequisite: if the operator configures a non-caching model as supervisor, cache optimisation silently does nothing. Add a startup log warning.
+
+---
+
+## Implementation (updated)
+
+### Step 0a: `cache_capable` column in `kukuvaia.models`
+
+**File**: `kukuvaia-app/src/main/resources/db/migration/V14__add_cache_capable_to_models.sql`
+
+```sql
+-- P08: Per-model prompt cache capability flag.
+-- Set by operator at model registration time; checked at runtime by CacheAwarePromptAdvisor.
+
+ALTER TABLE kukuvaia.models
+    ADD COLUMN cache_capable BOOLEAN NOT NULL DEFAULT FALSE;
+
+COMMENT ON COLUMN kukuvaia.models.cache_capable IS
+    'True when the provider supports prompt/prefix caching for this model. '
+    'Source of truth for P08 activation per request. '
+    'Operators update this when registering a model based on provider docs.';
+
+-- Backfill known-caching models. Safe defaults: false means "no cache attempt".
+UPDATE kukuvaia.models SET cache_capable = TRUE
+WHERE model_id IN (
+    'eu.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    'eu.anthropic.claude-opus-4-6-v1',
+    'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
+    'openrouter/elephant-alpha',
+    'google/gemini-2.5-flash',
+    'google/gemini-2.5-pro'
+    -- Extend as operator registers more models
+);
+```
+
+After migration runs, new models default to `cache_capable=false`. Operator flips to `true` when registering a known-caching model — either via admin UI or direct SQL.
+
+### Step 0b: `ModelRecord` + `ModelRepository` carry the flag
+
+**Modify**: `kukuvaia-core/src/main/java/ai/kukuvaia/provider/registry/ModelRecord.java`
+
+```java
+public record ModelRecord(
+        UUID id,
+        UUID providerId,
+        String modelId,
+        String displayName,
+        List<String> capabilities,
+        String tier,
+        int maxTokens,
+        Integer contextWindow,
+        boolean cacheCapable,          // NEW
+        Instant discoveredAt
+) {
+    public ModelRecord {
+        if (maxTokens <= 0) maxTokens = 4096;
+    }
+}
+```
+
+Update `ModelRepository`:
+- `save(...)` — INSERT includes `cache_capable` column
+- `findAll()` / `findById(...)` — SELECT reads it, RowMapper populates the field
+- `update(...)` — UpdateModelRequest gets `Boolean cacheCapable` (optional, so operator can toggle)
+
+Update `ProviderRegistryService.registerModel(...)` to accept `boolean cacheCapable` argument. `ProviderSeeder` (bootstrap) writes the flag for known models.
+
+### Step 0c: Admin UI field (kukuvaia-admin)
+
+**File**: `kukuvaia-admin/src/components/ModelForm.tsx` (or equivalent)
+
+Add a labelled toggle:
+
+```
+[ ] Cache capable
+    Check when the provider supports prompt/prefix caching for this model
+    (Claude, Gemini 2.5+, DeepSeek, Elephant Alpha — not Mistral Small, Qwen,
+    Nova-Micro, or plain Gemma).
+```
+
+Write through existing `PUT /api/providers/models/{id}` endpoint (`UpdateModelRequest` already covers this once `cacheCapable` is added).
+
+### Step 0: SystemPromptBuilder wiring decision
+
+Make `SystemPromptBuilder` constants `public` and split its `build()` method into two public helpers:
+
+```java
+public String staticPrefix();           // Zone 1 content (planning + verification + security)
+public String semiStaticSection(PersonaSpec persona, String activeSkill, List<String> rules); // Zone 2
+```
+
+Delete the old two-argument `build(...)` methods after wiring — no caller today.
+
+**Note**: if wiring turns out to be larger than 2h, switch to Option 1 (inline in `CacheAwarePromptAdvisor`) and remove `SystemPromptBuilder`.
+
+### Step 1: `CacheAwarePromptAdvisor`
 
 **File**: `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheAwarePromptAdvisor.java`
 
-This advisor replaces the current pattern where multiple advisors independently call `augmentSystemMessage()`. Instead, it builds the complete system prompt in the correct order with cache-control markers.
+Runs at `HIGHEST_PRECEDENCE + 1` — BEFORE all other advisors that augment the system prompt. Replaces the persona-prompt-from-AgentService pattern with a structured Zone 1 + Zone 2 assembly.
+
+**Per-model gating**: the advisor queries `kukuvaia.models.cache_capable` for the model actually routed to this request (`ModelRoutingAdvisor` sets `kukuvaia.routing.model` in context). If the flag is false OR master `kukuvaia.cache.enabled` is false, the advisor **still orders zones correctly** but **skips the CACHE_BREAKPOINT sentinels** — so the interceptor in Step 3 has no triggers and OpenAI-automatic caching simply runs as before. Downstream behaviour is unaffected.
+
+Downstream advisors (`SmartMemoryAdvisor`, `SessionContextAdvisor`, `PlanningModeService`, `HarnessAdvisor`, `MessageChatMemoryAdvisor`) continue to run and append to Zone 3/4 as they do today — we don't rewrite them, we just make sure Zone 1+2 is already in place when they run.
 
 ```java
-package ai.kukuvaia.advisors;
-
-import ai.kukuvaia.agent.PersonaService;
-import ai.kukuvaia.agent.SystemPromptBuilder;
-import org.springframework.ai.chat.client.ChatClientRequest;
-import org.springframework.ai.chat.client.ChatClientResponse;
-import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
-import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
-import org.springframework.core.Ordered;
-import org.springframework.stereotype.Component;
-
-/**
- * Assembles the system prompt in cache-optimal order.
- * Runs early in the chain — before SmartMemoryAdvisor and others
- * that would otherwise augment the system prompt in suboptimal order.
- *
- * Order: HIGHEST_PRECEDENCE + 1 (after ProviderAuditLog)
- *
- * Note: This replaces ToolResultSanitizingAdvisor's augmentSystemMessage behavior.
- * ToolResultSanitizingAdvisor's SAFETY_SUFFIX is now included in Zone 1 by this advisor.
- * ToolResultSanitizingAdvisor should be refactored to only set a context flag,
- * and this advisor incorporates its text.
- */
 @Component
 public class CacheAwarePromptAdvisor implements BaseAdvisor {
 
-    private static final String CACHE_BREAKPOINT = "\n<!-- cache_control: ephemeral -->\n";
+    public static final String CACHE_BREAKPOINT_1 = "\n<!-- cache_control: ephemeral #1 -->\n";
+    public static final String CACHE_BREAKPOINT_2 = "\n<!-- cache_control: ephemeral #2 -->\n";
 
     private final PersonaService personaService;
-    private final SystemPromptBuilder systemPromptBuilder;
+    private final SystemPromptBuilder builder;
 
     @Override
     public int getOrder() {
@@ -165,33 +279,20 @@ public class CacheAwarePromptAdvisor implements BaseAdvisor {
 
     @Override
     public ChatClientRequest before(ChatClientRequest request, AdvisorChain chain) {
-        String sessionId = (String) request.context()
-                .getOrDefault("chat_memory_conversation_id", "default");
-
+        String sessionId = (String) request.context().getOrDefault("chat_memory_conversation_id", "default");
         var persona = personaService.getActivePersona(sessionId);
-        String intent = (String) request.context().getOrDefault("kukuvaia.intent", "");
-        String activeSkill = (String) request.context().getOrDefault("kukuvaia.activeSkill", "");
+        String skill = (String) request.context().getOrDefault("kukuvaia.activeSkill", "");
 
-        // Zone 1: Static prefix (always the same)
-        var sb = new StringBuilder();
-        sb.append(SystemPromptBuilder.PLANNING_INSTRUCTIONS);
-        sb.append(SystemPromptBuilder.VERIFICATION_MANDATE);
-        sb.append(SystemPromptBuilder.SAFETY_SUFFIX);
-        sb.append(CACHE_BREAKPOINT); // Breakpoint 1
+        String zone1 = builder.staticPrefix();
+        String zone2 = builder.semiStaticSection(persona, skill, List.of()); // rules added by HarnessAdvisor
 
-        // Zone 2: Semi-static (per persona/session)
-        sb.append("\n## Persona\n").append(persona.systemPrompt()).append("\n");
-        // Rules and skill appended here
-        if (activeSkill != null && !activeSkill.isBlank()) {
-            sb.append("\n## Active Skill\n").append(activeSkill).append("\n");
-        }
-        sb.append(CACHE_BREAKPOINT); // Breakpoint 2
-
-        // Zone 3 and Zone 4 are added by downstream advisors
-        // (SmartMemoryAdvisor, MessageChatMemoryAdvisor)
+        // Replace existing system message so downstream advisors' augmentSystemMessage
+        // appends to the OUR cache-aware prefix.
+        String combined = zone1 + CACHE_BREAKPOINT_1 + zone2 + CACHE_BREAKPOINT_2;
 
         return request.mutate()
-                .prompt(request.prompt().mutateSystemMessage(sb.toString()))
+                .prompt(request.prompt().mutateSystemMessage(combined))
+                .context("kukuvaia.cacheAwarePrompt", true) // flag for downstream
                 .build();
     }
 
@@ -202,217 +303,141 @@ public class CacheAwarePromptAdvisor implements BaseAdvisor {
 }
 ```
 
-### Step 2: Refactor ToolResultSanitizingAdvisor
+### Step 2: Downstream advisors cooperate with Zone 1+2
 
-**Modify**: `kukuvaia-core/src/main/java/ai/kukuvaia/security/ToolResultSanitizingAdvisor.java`
+Each advisor that currently calls `augmentSystemMessage` in its `before()` is audited:
 
-Extract SAFETY_SUFFIX as a public constant so CacheAwarePromptAdvisor can include it in Zone 1. ToolResultSanitizingAdvisor's `before()` becomes a no-op (or sets a context flag) when CacheAwarePromptAdvisor is active.
+| Advisor | Current behaviour | Change |
+|---------|-------------------|--------|
+| `ToolResultSanitizingAdvisor` | Appends `SAFETY_SUFFIX` | Check `kukuvaia.cacheAwarePrompt` flag; if set, skip — CacheAware already put SAFETY_SUFFIX in Zone 1 via `SystemPromptBuilder.staticPrefix()` |
+| `HarnessAdvisor` | Injects user rules | Check flag; if set, append to Zone 2 (still fine as it runs after CacheAware) |
+| `SessionContextAdvisor` | Injects plans+commitments | No change — by design Zone 3 content |
+| `PlanningModeService` | Injects phase prompt | No change — Zone 3 |
+| `SmartMemoryAdvisor` | Injects memories | No change — Zone 3 |
 
-```java
-// Make SAFETY_SUFFIX accessible
-public static final String SAFETY_SUFFIX = """
-        ...
-        """;
+Net effect: downstream advisors remain untouched except `ToolResultSanitizingAdvisor` which gets a single if-block for its `SAFETY_SUFFIX` duplication.
 
-@Override
-public ChatClientRequest before(ChatClientRequest request, AdvisorChain chain) {
-    // When CacheAwarePromptAdvisor is active, it handles SAFETY_SUFFIX placement
-    if (request.context().containsKey("kukuvaia.cacheAwarePrompt")) {
-        return request; // Already included in cache-optimal position
-    }
-    // Backward compat: if cache-aware advisor is not in chain
-    return request.mutate()
-            .prompt(request.prompt().augmentSystemMessage(SAFETY_SUFFIX))
-            .build();
-}
-```
+**Helper**: a small `ModelCacheCapabilityService` wraps `ModelRepository` with an in-memory cache (5 s TTL) keyed by model id — keeps the per-request lookup at nanosecond cost. All advisors that need the flag read from this service, never hit the DB directly.
 
-### Step 3: Anthropic cache_control markers via Spring AI
+### Step 3: Anthropic `cache_control` via RestClient interceptor
 
-**File**: `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/AnthropicCacheMarkerAdvisor.java`
+**File**: `kukuvaia-core/src/main/java/ai/kukuvaia/provider/CacheControlInterceptor.java`
 
-Spring AI's OpenAI-compatible API may not directly support Anthropic's `cache_control` field. This advisor adds cache control metadata to the request when the active provider is Anthropic:
+Spring AI's OpenAiApi does not expose `cache_control` on `ChatCompletionMessage`. Workaround: intercept the serialised HTTP request body, inject `cache_control` objects into the Anthropic-bound JSON before it leaves the client.
 
 ```java
 @Component
-@ConditionalOnProperty(name = "kukuvaia.cache.anthropic-markers", havingValue = "true")
-public class AnthropicCacheMarkerAdvisor implements BaseAdvisor {
+@ConditionalOnProperty("kukuvaia.cache.anthropic-markers")
+public class CacheControlInterceptor implements ClientHttpRequestInterceptor {
+    private final ObjectMapper mapper;
 
     @Override
-    public int getOrder() {
-        // Run after CacheAwarePromptAdvisor, before the actual LLM call
-        return Ordered.LOWEST_PRECEDENCE - 10;
+    public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution ex) throws IOException {
+        if (!looksLikeAnthropic(request)) {
+            return ex.execute(request, body);
+        }
+        byte[] modified = injectCacheBreakpoints(body);
+        return ex.execute(request, modified);
     }
 
-    @Override
-    public ChatClientRequest before(ChatClientRequest request, AdvisorChain chain) {
-        // Detect provider type from context
-        String provider = (String) request.context().getOrDefault("kukuvaia.provider", "");
-        if (!isAnthropicProvider(provider)) return request;
-
-        // Insert cache_control breakpoints into the prompt
-        // Implementation depends on Spring AI's support for Anthropic-specific fields
-        // Option A: Custom HTTP header via ChatOptions
-        // Option B: Provider-specific ChatOptions subclass
-        // Option C: Raw API extension point in Spring AI
-        return request;
+    private byte[] injectCacheBreakpoints(byte[] body) throws IOException {
+        JsonNode root = mapper.readTree(body);
+        ArrayNode messages = (ArrayNode) root.get("messages");
+        if (messages == null) return body;
+        for (JsonNode msg : messages) {
+            if (!"system".equals(msg.path("role").asText())) continue;
+            String content = msg.path("content").asText();
+            // Find our sentinel CacheAwarePromptAdvisor.CACHE_BREAKPOINT_1/_2
+            // Replace system content with an array of blocks with cache_control
+            // on blocks ending at each breakpoint.
+            // Rewrite msg to match Anthropic's content-blocks schema.
+        }
+        return mapper.writeValueAsBytes(root);
     }
 }
 ```
 
-**Note**: The exact mechanism depends on Spring AI 1.1's support for provider-specific metadata. If Spring AI does not yet support `cache_control`, this step becomes a provider-level HTTP interceptor that modifies the request body before sending. This is documented as a constraint below.
+Wired into `ChatModelFactory.build()` via `restClientBuilder.interceptors(cacheControlInterceptor)`.
 
-### Step 4: Cache hit rate monitoring
+Gated by `kukuvaia.cache.anthropic-markers=true` so it can be toggled per deployment without code change.
+
+### Step 4: `CacheMonitoringAdvisor`
 
 **File**: `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheMonitoringAdvisor.java`
 
-Reads cache hit information from LLM response headers/metadata:
+Reads `chatResponse.getMetadata().getUsage()` in `after()`, casts to `OpenAiApi.Usage`, extracts `PromptTokensDetails.cachedTokens`. Emits Micrometer metrics:
 
-```java
-@Component
-public class CacheMonitoringAdvisor implements BaseAdvisor {
+- `kukuvaia.llm.cache.hits` — counter (tagged `provider`, `model`)
+- `kukuvaia.llm.cache.misses` — counter
+- `kukuvaia.llm.cache.cached_tokens` — counter
+- `kukuvaia.llm.cache.hit_ratio` — gauge (5-minute sliding window)
 
-    private static final Logger log = LoggerFactory.getLogger(CacheMonitoringAdvisor.class);
+Also emits `SpanEventBlock` attribute on the existing `role:supervisor` span: `kukuvaia.cache.hit=true/false`, `kukuvaia.cache.tokens=N`.
 
-    // Metrics: MeterRegistry for Micrometer (when observability is added)
-    private final AtomicLong cacheHits = new AtomicLong(0);
-    private final AtomicLong cacheMisses = new AtomicLong(0);
-    private final AtomicLong cachedTokens = new AtomicLong(0);
-
-    @Override
-    public int getOrder() {
-        return Ordered.LOWEST_PRECEDENCE - 5; // Late in chain, reads response
-    }
-
-    @Override
-    public ChatClientResponse after(ChatClientResponse response, AdvisorChain chain) {
-        var chatResponse = response.chatResponse();
-        if (chatResponse == null) return response;
-
-        var usage = chatResponse.getMetadata().getUsage();
-        if (usage == null) return response;
-
-        // Anthropic returns cache_creation_input_tokens and cache_read_input_tokens
-        // OpenAI returns cached_tokens in usage.prompt_tokens_details
-        // Spring AI may expose these via Usage or metadata map
-
-        var metadata = chatResponse.getMetadata();
-        // Extract cache metrics from provider-specific usage fields
-        long cachedInput = extractCachedTokens(metadata);
-
-        if (cachedInput > 0) {
-            cacheHits.incrementAndGet();
-            cachedTokens.addAndGet(cachedInput);
-            log.debug("Cache HIT: {} cached tokens", cachedInput);
-        } else {
-            cacheMisses.incrementAndGet();
-            log.debug("Cache MISS");
-        }
-
-        // Log periodic summary
-        long total = cacheHits.get() + cacheMisses.get();
-        if (total % 100 == 0 && total > 0) {
-            double hitRate = (double) cacheHits.get() / total * 100;
-            log.info("Cache stats: hitRate={}%, hits={}, misses={}, cachedTokens={}",
-                    String.format("%.1f", hitRate), cacheHits.get(), cacheMisses.get(),
-                    cachedTokens.get());
-        }
-
-        return response;
-    }
-
-    public double getHitRate() {
-        long total = cacheHits.get() + cacheMisses.get();
-        return total > 0 ? (double) cacheHits.get() / total : 0;
-    }
-
-    public long getCachedTokens() {
-        return cachedTokens.get();
-    }
-}
-```
-
-### Step 5: SmartMemoryAdvisor stability optimization
+### Step 5: `SmartMemoryAdvisor` TTL cache
 
 **Modify**: `kukuvaia-memory/src/main/java/ai/kukuvaia/memory/advisor/SmartMemoryAdvisor.java`
 
-Improve cache friendliness by stabilizing the memory block between requests in the same session:
+Add a per-session `CachedMemoryBlock` with TTL (default 60s). Within TTL, re-inject the identical memory block — keeps Zone 3 prefix stable, maximising cross-turn cache hits.
 
 ```java
-// Session-level memory cache: reuse same memory block within a time window
+private record CachedMemoryBlock(String block, long timestamp) {}
 private final Map<String, CachedMemoryBlock> memoryCache = new ConcurrentHashMap<>();
 
-private record CachedMemoryBlock(String block, long timestamp) {}
-
-private static final long MEMORY_CACHE_TTL_MS = 60_000; // 1 minute
-
-@Override
-public ChatClientRequest before(ChatClientRequest request, AdvisorChain chain) {
-    String sessionId = ...; // existing code
-    String userId = ...;
-
-    // Check if cached memory block is still valid
-    var cached = memoryCache.get(sessionId);
-    if (cached != null && System.currentTimeMillis() - cached.timestamp() < MEMORY_CACHE_TTL_MS) {
-        // Reuse same memory block — maximizes cache prefix hit
-        return request.mutate()
-                .prompt(request.prompt().augmentSystemMessage(cached.block()))
-                .build();
-    }
-
-    // Otherwise, retrieve fresh memories (existing semantic search logic)
-    // ... existing code ...
-
-    // Cache the memory block for this session
-    memoryCache.put(sessionId, new CachedMemoryBlock(memoryBlock.toString(), System.currentTimeMillis()));
-
-    return request.mutate()
-            .prompt(request.prompt().augmentSystemMessage(memoryBlock.toString()))
-            .build();
-}
+@Value("${kukuvaia.cache.memory-block-ttl-seconds:60}")
+private int ttlSeconds;
 ```
 
-This means within a 1-minute window, the same memory block is injected, keeping the prompt prefix identical and maximizing cache hits.
+Applied only when `kukuvaia.cache.enabled=true` (master switch).
 
-### Step 6: SystemPromptBuilder refactor — expose static constants
+### Step 6: `SessionContextAdvisor` TTL cache
 
-**Modify**: `kukuvaia-core/src/main/java/ai/kukuvaia/agent/SystemPromptBuilder.java`
+**Modify**: `SessionContextAdvisor` — same TTL pattern as `SmartMemoryAdvisor`. Plans and commitments rarely change within a 60s window; re-fetching on every turn defeats the Zone 3 cache boundary.
 
-Make static prompt sections accessible as public constants for CacheAwarePromptAdvisor:
+Invalidate cache when `/plan`, `/todo add|done|drop` slash commands run — they mutate the underlying data.
 
-```java
-// Change visibility from private to public
-public static final String VERIFICATION_MANDATE = ...;
-public static final String PLANNING_INSTRUCTIONS = ...;
-public static final String STATIC_BOUNDARY = ...;
-```
-
-### Step 7: Token budget allocation configuration
-
-**File**: `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheConfig.java`
+### Step 7: `CacheConfig` + startup warning (DB-driven)
 
 ```java
 @ConfigurationProperties(prefix = "kukuvaia.cache")
 public record CacheConfig(
-        boolean enabled,                    // master switch
-        boolean anthropicMarkers,           // send cache_control markers
-        int memoryBlockTtlSeconds,          // SmartMemoryAdvisor cache TTL
-        int staticPrefixMaxTokens,          // max tokens for Zone 1+2
-        int memoryMaxTokens                 // max tokens for Zone 3
-) {
-    public CacheConfig {
-        if (memoryBlockTtlSeconds <= 0) memoryBlockTtlSeconds = 60;
-        if (staticPrefixMaxTokens <= 0) staticPrefixMaxTokens = 2000;
-        if (memoryMaxTokens <= 0) memoryMaxTokens = 1000;
+        boolean enabled,
+        boolean anthropicMarkers,
+        int memoryBlockTtlSeconds,
+        int sessionContextTtlSeconds
+) {}
+```
+
+Startup warning is **driven by the `cache_capable` column**, not a hardcoded list.
+
+```java
+@EventListener(ApplicationReadyEvent.class)
+void checkSupervisorCacheCapability() {
+    if (!config.enabled()) return;
+    String role = "supervisor";
+    ModelRecord supervisor = modelRepository.findByRole(role).orElse(null);
+    if (supervisor == null) {
+        log.warn("No model assigned to role '{}' — cache optimisation inactive", role);
+        return;
+    }
+    if (!supervisor.cacheCapable()) {
+        log.warn("""
+                Prompt cache is enabled but the supervisor model '{}' has cache_capable=false.
+                P08 optimisation will be a no-op for supervisor turns.
+                Either flip the flag (if the provider does support caching) or switch supervisor
+                to a cache-capable model.""",
+                supervisor.modelId());
+    } else {
+        log.info("Prompt cache active for supervisor model '{}'", supervisor.modelId());
     }
 }
 ```
 
+Optionally extend the check to `advisor` role too (same rules, lower severity since rare path).
+
 ---
 
-## Configuration
-
-### application.yaml additions
+## Configuration (final)
 
 ```yaml
 kukuvaia:
@@ -420,163 +445,166 @@ kukuvaia:
     enabled: ${KUKUVAIA_PROMPT_CACHE:true}
     anthropic-markers: ${KUKUVAIA_ANTHROPIC_CACHE_MARKERS:false}
     memory-block-ttl-seconds: 60
-    static-prefix-max-tokens: 2000
-    memory-max-tokens: 1000
+    session-context-ttl-seconds: 60
 ```
 
 ---
 
-## Dependencies
+## File inventory (updated)
 
-| Dependency | Purpose | New? |
-|-----------|---------|------|
-| Spring AI BaseAdvisor | Advisor interface | Existing |
-| SystemPromptBuilder | Static prompt sections | Existing (modified) |
-| SmartMemoryAdvisor | Memory block caching | Existing (modified) |
-| PersonaService | Active persona for Zone 2 | Existing |
+### New (6)
 
-No new external dependencies. Anthropic cache_control support depends on Spring AI's provider extension points.
-
----
-
-## Constraints and Risks
-
-### Spring AI cache_control support
-
-Spring AI 1.1's `OpenAiApi` is designed for OpenAI-compatible endpoints. Anthropic's `cache_control` field is a non-standard extension. Options:
-
-1. **Best case**: Spring AI 1.1+ supports Anthropic-specific metadata via ChatOptions — use directly
-2. **Medium case**: SmartGate (the proxy) handles cache_control transparently — no client changes needed
-3. **Worst case**: Need a custom `RestClient` interceptor to inject `cache_control` into the request body
-
-Mitigation: The prompt ordering optimization (Steps 1-5) provides benefits regardless of cache_control markers — providers with automatic prefix caching (OpenAI) benefit immediately. Anthropic-specific markers (Step 3) can be deferred.
-
-### Memory block stability vs freshness
-
-Caching the memory block for 60 seconds means a newly saved memory will not appear in prompts for up to 60 seconds. This is acceptable because:
-- Memories are cross-session knowledge, not real-time data
-- Users can force-refresh by starting a new session
-- The TTL is configurable
-
----
-
-## File Inventory
-
-### New files (3)
-
-| File | Description |
-|------|-------------|
-| `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheAwarePromptAdvisor.java` | Consolidates system prompt in cache-optimal order |
-| `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheMonitoringAdvisor.java` | Tracks cache hit rates from response metadata |
-| `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/CacheConfig.java` | @ConfigurationProperties for cache tuning |
-
-### Modified files (4)
-
-| File | Change |
+| File | Effort |
 |------|--------|
-| `kukuvaia-core/src/main/java/ai/kukuvaia/security/ToolResultSanitizingAdvisor.java` | Make SAFETY_SUFFIX public, conditional augment |
-| `kukuvaia-core/src/main/java/ai/kukuvaia/agent/SystemPromptBuilder.java` | Make constants public |
-| `kukuvaia-memory/src/main/java/ai/kukuvaia/memory/advisor/SmartMemoryAdvisor.java` | Add memory block TTL cache |
-| `kukuvaia-app/src/main/resources/application.yaml` | Add kukuvaia.cache.* section |
+| `db/migration/V14__add_cache_capable_to_models.sql` | 0.1 day |
+| `provider/ModelCacheCapabilityService.java` (5s TTL cache over ModelRepository) | 0.25 day |
+| `advisors/CacheAwarePromptAdvisor.java` | 0.5 day |
+| `advisors/CacheMonitoringAdvisor.java` | 0.5 day |
+| `advisors/CacheConfig.java` | 0.25 day |
+| `provider/CacheControlInterceptor.java` | 1 day (Anthropic only) |
 
-### Conditionally new (1)
+### Modified (9)
 
-| File | Description |
-|------|-------------|
-| `kukuvaia-core/src/main/java/ai/kukuvaia/advisors/AnthropicCacheMarkerAdvisor.java` | Anthropic-specific cache markers (deferred if Spring AI lacks support) |
+| File | Change | Effort |
+|------|--------|--------|
+| `provider/registry/ModelRecord.java` | Add `boolean cacheCapable` field | 0.1 day |
+| `provider/registry/ModelRepository.java` | SELECT/INSERT/UPDATE handle new column | 0.25 day |
+| `provider/registry/UpdateModelRequest.java` | Add `Boolean cacheCapable` optional param | 0.1 day |
+| `provider/registry/ProviderRegistryService.java` | Register-model signature carries the flag | 0.1 day |
+| `provider/registry/ProviderSeeder.java` | Seed known-caching models with true | 0.1 day |
+| `agent/SystemPromptBuilder.java` | Make public, add `staticPrefix()` / `semiStaticSection()` | 0.5 day |
+| `security/ToolResultSanitizingAdvisor.java` | Conditional `augmentSystemMessage` | 0.25 day |
+| `memory/advisor/SmartMemoryAdvisor.java` | TTL cache (gated by model's cache_capable) | 0.5 day |
+| `advisors/SessionContextAdvisor.java` | TTL cache + invalidation hooks (gated) | 0.5 day |
+| `config/ChatClientConfig.java` | Register new advisor | 0.1 day |
+| `app/application.yaml` | `kukuvaia.cache.*` section | 0.1 day |
+| `admin/src/components/ModelForm.tsx` | Cache-capable toggle in UI | 0.25 day |
 
-### Test files (3)
+### Test (4)
 
-| File | What it tests |
-|------|--------------|
-| `kukuvaia-core/src/test/java/ai/kukuvaia/advisors/CacheAwarePromptAdvisorTest.java` | Prompt zone ordering, breakpoint placement |
-| `kukuvaia-core/src/test/java/ai/kukuvaia/advisors/CacheMonitoringAdvisorTest.java` | Hit rate calculation, periodic logging |
-| `kukuvaia-memory/src/test/java/ai/kukuvaia/memory/advisor/SmartMemoryAdvisorCacheTest.java` | Memory block TTL, cache hit within window |
-
----
-
-## Verification
-
-### Unit tests
-
-```bash
-./gradlew :kukuvaia-core:test --tests "ai.kukuvaia.advisors.CacheAware*"
-./gradlew :kukuvaia-core:test --tests "ai.kukuvaia.advisors.CacheMonitoring*"
-./gradlew :kukuvaia-memory:test --tests "ai.kukuvaia.memory.advisor.SmartMemoryAdvisorCacheTest"
-```
-
-Expected:
-- `CacheAwarePromptAdvisorTest`: system prompt starts with Zone 1 (static), Zone 2 (persona) follows, breakpoints at correct positions
-- `CacheMonitoringAdvisorTest`: hit rate calculation correct, periodic logging triggers at intervals
-- `SmartMemoryAdvisorCacheTest`: same memory block returned within TTL window; fresh retrieval after TTL expires
-
-### Integration test
-
-Verify prompt ordering end-to-end with a mocked ChatModel that captures the full prompt:
-
-```java
-@Test
-void promptOrder_staticPrefixFirst_thenPersona_thenMemories() {
-    // Given: a session with persona and memories
-    // When: chat request goes through advisor chain
-    // Then: captured system prompt has zones in order:
-    //   1. Planning + Verification + Security
-    //   2. Persona + Rules
-    //   3. Memories
-}
-```
-
-### Manual verification
-
-```bash
-# Enable debug logging for advisors
-logging.level.ai.kukuvaia.advisors=DEBUG
-
-# Send multiple messages in same session
-# Check logs for:
-# 1. "Cache HIT" / "Cache MISS" entries
-# 2. Memory block reuse within TTL window
-# 3. Prompt ordering (Zone 1 → Zone 2 → Zone 3 → Zone 4)
-
-# After 100+ requests, check aggregate stats:
-grep "Cache stats:" logs/kukuvaia.log
-# Expected: hitRate >60% for same-session conversations
-```
+| File | What it tests | Effort |
+|------|--------------|--------|
+| `advisors/CacheAwarePromptAdvisorTest.java` | Zone 1+2 ordering, breakpoint placement | 0.5 day |
+| `advisors/CacheMonitoringAdvisorTest.java` | Cached-token extraction from `PromptTokensDetails` | 0.5 day |
+| `memory/advisor/SmartMemoryAdvisorCacheTest.java` | TTL honored, invalidation correct | 0.5 day |
+| `provider/CacheControlInterceptorTest.java` | JSON rewrite targets system messages only | 0.5 day |
 
 ---
 
-## Effort Estimate
+## Effort (realistic)
 
-| Phase | Scope | Effort |
-|-------|-------|--------|
-| Phase 1 | CacheAwarePromptAdvisor + SystemPromptBuilder refactor | 1.5 days |
-| Phase 2 | ToolResultSanitizingAdvisor refactor (conditional augment) | 0.5 day |
-| Phase 3 | SmartMemoryAdvisor TTL cache | 1 day |
-| Phase 4 | CacheMonitoringAdvisor | 0.5 day |
-| Phase 5 | CacheConfig + application.yaml | 0.5 day |
-| Phase 6 | AnthropicCacheMarkerAdvisor (if Spring AI supports it) | 1 day |
-| Phase 7 | Tests | 1.5 days |
-| **Total (without Anthropic markers)** | | **5.5 days** |
-| **Total (with Anthropic markers)** | | **6.5 days** |
+| Phase | Effort |
+|-------|--------|
+| Step 0a: V14 migration + backfill | 0.1 day |
+| Step 0b: `ModelRecord` + repository + registry wiring | 0.4 day |
+| Step 0c: Admin UI toggle | 0.25 day |
+| Step 0: SystemPromptBuilder wiring | 0.5 day |
+| Step 1: CacheAwarePromptAdvisor + ModelCacheCapabilityService | 0.6 day |
+| Step 2: Downstream advisor audit + conditional | 0.5 day |
+| Step 3: Anthropic RestClient interceptor | 1 day |
+| Step 4: Monitoring advisor | 0.5 day |
+| Step 5: SmartMemory TTL (gated) | 0.5 day |
+| Step 6: SessionContext TTL + invalidation (gated) | 0.5 day |
+| Step 7: CacheConfig + DB-driven startup warning | 0.25 day |
+| Tests + integration (positive + negative) | 1.5 days |
+| **Total** | **~6.6 days** |
+
+**AI-paired realistic estimate** (per recent calibration memory): ~**5–7 hours** for core (Steps 0a/0b/0 + 1–2 + 4–7 + basic tests), Step 3 Anthropic interceptor adds ~1–2 h, Step 0c Admin UI adds ~20 min.
 
 ---
 
-## Priority & Prerequisites
+## Dependencies & blockers
 
-**Priority**: Medium — cost optimization. Impact scales with usage volume. Most valuable for high-volume deployments.
+| Item | Status | Blocks implementation? |
+|------|--------|-----------------------|
+| Spring AI 1.1 `PromptTokensDetails.cachedTokens` | ✅ confirmed | No |
+| Spring AI 1.1 `cache_control` native support | ❌ missing | Only Anthropic step — workaround via interceptor |
+| `ChatClientConfig` advisor chain operational | ✅ | No |
+| `SmartMemoryAdvisor` operational | ✅ | No |
+| `SessionContextAdvisor` operational | ✅ (added 2026-04-19) | No |
+| `PersonaService` operational | ✅ | No |
+| `SystemPromptBuilder` wired | ❌ (orphan) | Resolved by Step 0 |
+| Supervisor model set to caching-capable | ⚠️ operator action required | No, but silently no-op if not done |
+| P01 observability (for cache metrics) | ✅ Stage A+B shipped | No |
 
-**Prerequisites**:
-- Current advisor chain operational (already done)
-- SmartMemoryAdvisor operational (already done)
-- SystemPromptBuilder operational (already done)
-- For Anthropic markers: understanding of Spring AI's provider extension points
+**No hard blockers.** Step 0 (SystemPromptBuilder wiring) and operator model selection are the only gotchas.
 
-**Blocked by**: Nothing — prompt ordering optimization works immediately.
+---
 
-**Blocks**:
-- Nothing directly — this is a pure optimization
-- Integrates well with P07 (Cost Tracking) for measuring cost savings
+## Acceptance criteria
 
-**Synergies**:
-- P07 (Cost Tracking): CacheMonitoringAdvisor provides data for cost savings reports
-- Model routing plan: cache-aware routing can prefer models with better caching support
+- [ ] Step 0a: V14 migration adds `cache_capable BOOLEAN NOT NULL DEFAULT FALSE` column; backfills listed caching models; `\d+ kukuvaia.models` shows the column.
+- [ ] Step 0b: `ModelRecord` carries `cacheCapable`; `findById(uuid).cacheCapable()` returns persisted value; UPDATE via `ProviderRegistryService` toggles it.
+- [ ] Step 0c: Admin UI model form has `cache_capable` toggle; saving through `PUT /api/providers/models/{id}` persists it.
+- [ ] Step 0: `SystemPromptBuilder` has public `staticPrefix()` / `semiStaticSection()` methods, referenced from `CacheAwarePromptAdvisor`. Dead `build()` overloads removed.
+- [ ] Step 1: `CacheAwarePromptAdvisor` injects Zone 1+2 as the system message prefix. When routed model has `cache_capable=false`, CACHE_BREAKPOINT sentinels are absent but zone ordering stays correct.
+- [ ] Step 2: `ToolResultSanitizingAdvisor.SAFETY_SUFFIX` does not appear twice when `CacheAwarePromptAdvisor` is active.
+- [ ] Step 3: With `kukuvaia.cache.anthropic-markers=true`, `cache_capable=true` on a Claude model, AND an Anthropic-routed request → captured HTTP body contains `cache_control` blocks at Zone 1/2 breakpoints.
+- [ ] Step 4: After a chat turn with a `cache_capable=true` model, `/actuator/prometheus` exposes `kukuvaia_llm_cache_*` metrics with non-zero values on the second identical prompt. With `cache_capable=false`, metrics report zero hits.
+- [ ] Step 5: `SmartMemoryAdvisor` returns the identical memory block within TTL; DB-hit stops after first call. Skipped entirely when active model has `cache_capable=false` (no payoff).
+- [ ] Step 6: `SessionContextAdvisor` respects TTL; `/plan`/`/todo` invocations invalidate the session's cached block. Skipped when `cache_capable=false`.
+- [ ] Step 7: Startup warning prints when supervisor role model has `cache_capable=false` AND `kukuvaia.cache.enabled=true`.
+- [ ] Integration: 10 consecutive chat turns in same session with a `cache_capable=true` model → `kukuvaia_llm_cache_hit_ratio` ≥ 0.7.
+- [ ] Integration (negative): 10 turns with `cache_capable=false` model → zero errors, zero cache attempts, zero performance regression vs pre-P08 baseline.
+
+---
+
+## Role selection table (operator guidance)
+
+When operator picks which model goes into which role in `kukuvaia.model_roles`:
+
+| Role | Cache expectation | Recommended models |
+|------|-------------------|---------------------|
+| `supervisor` | **MUST cache** — high volume, full prompt every turn | Claude Sonnet 4.5, GPT-4.1, Elephant Alpha, DeepSeek V3, Claude Opus 4.6 |
+| `advisor` | Preferred but optional — rare ESCALATE path | Claude Opus 4.6 (best reasoning + cache), GPT-4.1 |
+| `worker` | Cache not required — delegated subtasks are short-lived | mistralai/mistral-small-2603, qwen3.5-9b, Mistral via any provider |
+| `worker-2` | Same as worker — second parallel worker | Different model than worker for diversity (gemma, qwen, etc.) |
+
+Startup warning (Step 7) enforces this only for `supervisor`; workers run without warning.
+
+---
+
+## Rollback
+
+Two levels of gating.
+
+**Global kill switch** (operator action, no restart required for most changes):
+- `kukuvaia.cache.enabled=false` → `CacheAwarePromptAdvisor`, `CacheMonitoringAdvisor`, TTL caches all become no-ops; ordering reverts to pre-P08 behaviour via `ToolResultSanitizingAdvisor`'s unconditional path.
+- `kukuvaia.cache.anthropic-markers=false` → interceptor not registered; Anthropic-bound requests go through unmodified.
+
+**Per-model kill switch** (DB update, no restart):
+- `UPDATE kukuvaia.models SET cache_capable = FALSE WHERE model_id = '…';` → all P08 logic becomes no-op for this specific model across all sessions. `ModelCacheCapabilityService` TTL cache picks up the change in ≤ 5 s.
+
+**Full revert**:
+- Git: remove 6 new files + unwind 12 modified files.
+- DB: Flyway V14 down migration drops the `cache_capable` column. Safe — column is nullable-defaulted, no app code crashes if it disappears (rollback assumed to happen together with code).
+
+---
+
+## Synergies
+
+- **P01 Observability**: `kukuvaia.llm.cache.*` metrics plug into existing Prometheus exposure and Grafana dashboards.
+- **P07 Cost Tracking**: cache hit ratios feed directly into cost-savings reports.
+- **P14 Tiered Context**: context budget reduction compounds with cache hits — smaller prompt × higher hit ratio = major cost win.
+- **P16 Stepped Reasoning**: reasoning-step spans can report per-step cache hits for fine-grained debugging.
+
+## Non-synergies / explicit out-of-scope
+
+- Does NOT reduce token usage on workers (delegated calls have fresh ephemeral prompts).
+- Does NOT cache tool results — those are per-call.
+- Does NOT change conversation history truncation logic (`MessageWindowChatMemory.maxMessages=100`).
+
+---
+
+## Trigger for activation
+
+Given the recent AI-paired implementation speed calibration, activate immediately after supervisor model is pinned to a caching-capable one. Trigger check:
+
+```sql
+SELECT m.model_id
+FROM kukuvaia.model_roles mr
+JOIN kukuvaia.models m ON mr.model_id = m.id
+WHERE mr.role = 'supervisor';
+```
+
+If result ∈ {claude-sonnet-4.5, claude-opus-4.6, gpt-4.1, elephant-alpha, deepseek-v3} → **ACTIVATE P08**. If result ∈ {mistral-small, qwen, nova-micro} → first switch supervisor, THEN activate P08.

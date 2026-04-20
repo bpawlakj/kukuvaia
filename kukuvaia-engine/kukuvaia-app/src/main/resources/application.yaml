@@ -18,6 +18,18 @@ kukuvaia:
       decay-factor: 0.95
       unaccessed-days: 7
       similarity-threshold: 0.95
+  chat:
+    memory:
+      # Sliding window of last N messages included in every LLM request.
+      # Modern models support >200K context; 100 msgs ≈ 30K tokens is a safe default.
+      max-messages: ${KUKUVAIA_CHAT_MEMORY_MAX_MESSAGES:100}
+  routing:
+    # Master switch for model routing (ModelRoutingAdvisor).
+    enabled: ${KUKUVAIA_ROUTING_ENABLED:true}
+    # P19 shadow mode — computes complexity-driven routing in parallel with the
+    # authoritative keyword classifier and records divergence via the
+    # `kukuvaia.routing.shadow_diff` counter. Never mutates the request.
+    shadow-mode: ${KUKUVAIA_ROUTING_SHADOW_MODE:true}
 
 spring:
   application:
@@ -60,6 +72,36 @@ spring:
 
 server:
   port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+    prometheus:
+      enabled: ${KUKUVAIA_METRICS_ENABLED:true}
+  metrics:
+    tags:
+      application: kukuvaia-engine
+    distribution:
+      percentiles-histogram:
+        kukuvaia.llm.request.duration: true
+        kukuvaia.tool.call.duration: true
+        kukuvaia.memory.extraction.duration: true
+        kukuvaia.memory.injection.duration: true
+      slo:
+        kukuvaia.llm.request.duration: 1s,5s,15s,30s,60s
+        kukuvaia.tool.call.duration: 100ms,500ms,1s,5s
+    enable:
+      jvm: true
+      process: true
+      system: true
+      hikaricp: true
+      jdbc: true
 
 logging:
   level:

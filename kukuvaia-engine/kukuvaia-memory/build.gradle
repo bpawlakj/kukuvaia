@@ -24,6 +24,9 @@ dependencies {
     // Local ONNX embedding model from HuggingFace (no external API needed)
     api 'org.springframework.ai:spring-ai-transformers'
 
+    // Observability — Micrometer API for custom metrics
+    api 'io.micrometer:micrometer-core'
+
     // Jackson
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
