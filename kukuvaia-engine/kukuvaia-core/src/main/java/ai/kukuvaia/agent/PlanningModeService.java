@@ -47,7 +47,11 @@ public class PlanningModeService implements BaseAdvisor {
 
     private static final Set<String> BLOCKED_IN_DISCOVERY = Set.of("createPlan", "revisePlan", "completeStep");
     private static final Set<String> BLOCKED_IN_DRAFTING = Set.of("completeStep", "updateDiscoveryFacts");
-    private static final Set<String> BLOCKED_IN_APPROVAL = Set.of("createPlan", "completeStep", "updateDiscoveryFacts");
+    private static final Set<String> BLOCKED_IN_APPROVAL = Set.of("createPlan", "revisePlan", "completeStep", "updateDiscoveryFacts");
+    /** Executing phase: only {@code completeStep} is unblocked. Structure-changing
+     *  tools are blocked so an accidentally-phrased follow-up cannot overwrite an
+     *  approved plan — the user must type {@code /plan revise} to transition back. */
+    private static final Set<String> BLOCKED_IN_EXECUTING = Set.of("createPlan", "revisePlan", "updateDiscoveryFacts");
 
     private final ConcurrentHashMap<String, PlanningSession> sessions = new ConcurrentHashMap<>();
     private final JdbcTemplate jdbcTemplate;
@@ -219,23 +223,76 @@ public class PlanningModeService implements BaseAdvisor {
     }
 
     /**
-     * Approve plan and exit planning mode. Updates plan status in DB to 'active'
-     * regardless of whether the in-memory session map still holds this session —
-     * otherwise approval across an engine restart or session eviction silently
-     * leaves plans stuck in 'draft'.
+     * Approve plan and transition to EXECUTING. Updates plan status in DB to
+     * 'active' and phase to 'executing'. Unlike the previous behaviour this
+     * does NOT remove the in-memory session — the user stays in planning mode
+     * so step completions and progress reports can be handled naturally.
+     * Exit happens through {@code /plan done}, {@code /plan exit}, or
+     * {@code /plan cancel}.
      */
     public void approvePlan(String sessionId) {
-        sessions.remove(sessionId); // best-effort cleanup; absence is not an error
         int updated = jdbcTemplate.update("""
-                UPDATE kukuvaia.plans SET status = 'active', updated_at = NOW()
+                UPDATE kukuvaia.plans SET status = 'active', phase = 'executing', updated_at = NOW()
                 WHERE session_id = ? AND status = 'draft'
                 """, sessionId);
         if (updated > 0) {
-            log.info("Plan approved: sessionId={}, dbUpdated={}", sessionId, updated);
+            sessions.computeIfPresent(sessionId, (id, session) -> session.withPhase(PlanningPhase.EXECUTING));
+            log.info("Plan approved → EXECUTING: sessionId={}, dbUpdated={}", sessionId, updated);
         } else {
             log.warn("approvePlan: no draft plan found for sessionId={} — " +
                     "either the plan was never saved or it was already approved/abandoned",
                     sessionId);
+        }
+    }
+
+    /**
+     * Drop from EXECUTING back to DRAFTING so the user can restructure the
+     * plan. DB status stays 'active' until the revised plan is re-approved —
+     * that way a draft-in-progress does not wipe the currently-live plan
+     * mid-edit. Phase is persisted so the picker reflects the true state.
+     */
+    public void revertExecutingToDrafting(String sessionId) {
+        sessions.computeIfPresent(sessionId, (id, session) -> {
+            if (session.phase() == PlanningPhase.EXECUTING) {
+                log.info("Planning transition: EXECUTING → DRAFTING (/plan revise), sessionId={}", id);
+                persistPhaseForSession(id, "drafting");
+                return session.withPhase(PlanningPhase.DRAFTING);
+            }
+            return session;
+        });
+    }
+
+    /**
+     * Close the plan as completed. Sets status='completed' + phase='done' in
+     * DB and removes the in-memory session. Per decision B2: no validation
+     * that all steps are checked — the user may close with partial progress.
+     *
+     * @return true if a row was updated, false when no active plan exists.
+     */
+    public boolean markExecutingDone(String sessionId) {
+        int updated = jdbcTemplate.update("""
+                UPDATE kukuvaia.plans SET status = 'completed', phase = 'done', updated_at = NOW()
+                WHERE session_id = ? AND status = 'active'
+                """, sessionId);
+        if (updated > 0) {
+            sessions.remove(sessionId);
+            log.info("Plan marked done: sessionId={}", sessionId);
+            return true;
+        }
+        log.warn("markExecutingDone: no active plan found for sessionId={}", sessionId);
+        return false;
+    }
+
+    /**
+     * Leave plan mode without changing status or phase in DB. Used by
+     * {@code /plan exit} so the user can chat normally; the plan remains
+     * 'active' / 'executing' and can be resumed later via
+     * {@code /plan resume <id>}.
+     */
+    public void exitPlanMode(String sessionId) {
+        var removed = sessions.remove(sessionId);
+        if (removed != null) {
+            log.info("Exited plan mode (in-memory only, DB unchanged): sessionId={}", sessionId);
         }
     }
 
@@ -395,6 +452,7 @@ public class PlanningModeService implements BaseAdvisor {
             case "discovery" -> PlanningPhase.DISCOVERY;
             case "drafting" -> PlanningPhase.DRAFTING;
             case "approval" -> PlanningPhase.APPROVAL;
+            case "executing" -> PlanningPhase.EXECUTING;
             default -> PlanningPhase.APPROVAL;
         };
     }
@@ -469,6 +527,7 @@ public class PlanningModeService implements BaseAdvisor {
             case DISCOVERY -> BLOCKED_IN_DISCOVERY;
             case DRAFTING -> BLOCKED_IN_DRAFTING;
             case APPROVAL -> BLOCKED_IN_APPROVAL;
+            case EXECUTING -> BLOCKED_IN_EXECUTING;
         };
     }
 
@@ -500,20 +559,24 @@ public class PlanningModeService implements BaseAdvisor {
                     ## Planning Mode — Drafting Phase
                     Task: "%s"
 
-                    ### Hard constraints (authoritative — do not violate)
+                    ### Current state
                     Known facts: %s
                     Excluded options: %s
+                    Open assumptions to resolve: %s
 
                     ### Rules
                     1. The plan MUST be consistent with Known facts and MUST NOT propose anything from Excluded options or any variant of them.
-                    2. Call `createPlan` with the task description and a JSON array of step descriptions. Do not use write_file or other file tools.
-                    3. If a step depends on a factual detail you are not certain about (geography, schedules, prices, availability), phrase it as an explicit assumption for the user to verify rather than stating it as fact.
-                    4. After saving, present the plan clearly.
+                    2. Treat each entry in "Open assumptions to resolve" as your own decision: pick the most reasonable default for the domain and inline it in the step it affects, prefixed with `Assumption:`. Do NOT re-ask the user; do NOT emit a step that merely restates the gap as a question.
+                    3. Every step MUST be self-contained and actionable: expand it with sub-items that name specific entities, quantitative ranges where relevant, decision branches, and prerequisites. A single-line headline is not a step.
+                    4. When a factual detail is uncertain, commit to a concrete value or range and label it with `Assumption:`. Avoid vague qualifiers as substitutes for numbers.
+                    5. Call `createPlan` with the task description and a JSON array of step descriptions; each step description is multi-line markdown — bullets and assumptions allowed inline. Do not use write_file or other file tools.
+                    6. After saving, present the plan clearly.
 
                     Respond in the user's language.""".formatted(
                     session.task(),
                     formatBullets(session.facts().knownFacts()),
-                    formatBullets(session.facts().excludedOptions()));
+                    formatBullets(session.facts().excludedOptions()),
+                    formatBullets(session.facts().remainingGaps()));
             case APPROVAL -> {
                 String planStatus = resolvePlanStatus(sessionId);
                 yield """
@@ -529,9 +592,9 @@ public class PlanningModeService implements BaseAdvisor {
                     1. The Plan status line above is the SOURCE OF TRUTH. It reads straight from the database. Do NOT claim the plan is approved/active/saved unless it says so.
                     2. Never self-declare approval. Only the user can approve — the system sets status to 'active' AFTER the user says a confirmation word.
                     3. If the user requests changes, call `revisePlan` with updated steps and reason. Revisions MUST respect Known facts and Excluded options.
-                    4. If the plan is still 'draft', ask the user a clear yes/no question such as: "Czy wszystko jasne, mogę zatwierdzić plan?" / "Is everything clear — shall I approve the plan?" Then WAIT for their explicit confirmation word.
+                    4. If the plan is still 'draft', ask the user a clear yes/no question such as: "Is everything clear — shall I approve the plan?" Then WAIT for their explicit confirmation word. Phrase the question in the user's language.
                     5. If the plan is already 'active', confirm it is saved and summarise next steps. Never re-ask for approval.
-                    6. Do not start executing the plan. Wait for the user's explicit confirmation (tak / yes / potwierdzam / ok / …).
+                    6. Do not start executing the plan. Wait for the user's explicit confirmation (e.g. "yes", "ok", "approve", "confirm" — accept semantically equivalent confirmations in the user's own language).
 
                     Respond in the user's language.""".formatted(
                     session.task(),
@@ -539,7 +602,68 @@ public class PlanningModeService implements BaseAdvisor {
                     formatBullets(session.facts().knownFacts()),
                     formatBullets(session.facts().excludedOptions()));
             }
+            case EXECUTING -> {
+                String planStatus = resolvePlanStatus(sessionId);
+                String stepsSummary = resolveStepsSummary(sessionId);
+                yield """
+                    ## Planning Mode — Executing Phase
+                    Plan: "%s"
+
+                    ### Current plan state (authoritative — read from DB, not inferred)
+                    Plan status: %s
+                    Steps: %s
+
+                    ### Rules
+                    1. The plan is approved and active. Do NOT propose new steps, rewrites, or restructuring.
+                    2. When the user reports finishing a step, call `completeStep(stepIndex, result)` with the 0-based step index and a short result summary.
+                    3. You MAY discuss, explain, or advise — reference the plan naturally.
+                    4. If the user wants structural changes, respond: "To change the plan structure, please type /plan revise."
+                    5. If the user signals the whole plan is done, respond: "To close the plan, please type /plan done."
+                    6. If the user wants to leave plan mode without closing, respond: "To leave plan mode without changing the plan, please type /plan exit."
+                    7. Never call `createPlan`, `revisePlan`, or `updateDiscoveryFacts` — they are disabled in this phase.
+
+                    Respond in the user's language.""".formatted(
+                    session.task(),
+                    planStatus,
+                    stepsSummary);
+            }
         };
+    }
+
+    /**
+     * Render the current {@code steps} JSONB column as a short human-readable
+     * summary for the EXECUTING prompt. Best-effort — a parse failure collapses
+     * to "(unavailable)" rather than blocking the chat turn.
+     */
+    private String resolveStepsSummary(String sessionId) {
+        try {
+            String stepsJson = jdbcTemplate.queryForObject(
+                    "SELECT steps::text FROM kukuvaia.plans " +
+                            "WHERE session_id = ? AND status = 'active' " +
+                            "ORDER BY updated_at DESC LIMIT 1",
+                    String.class, sessionId);
+            if (stepsJson == null || stepsJson.isBlank()) return "(no steps)";
+            var node = objectMapper.readTree(stepsJson);
+            if (!node.isArray() || node.isEmpty()) return "(no steps)";
+            var sb = new StringBuilder();
+            for (int i = 0; i < node.size(); i++) {
+                var step = node.get(i);
+                String description = step.has("description") ? step.get("description").asText() : step.asText();
+                String status = step.has("status") ? step.get("status").asText() : "pending";
+                sb.append("\n  ").append(i).append(". [").append(status).append("] ").append(truncate(description, 120));
+            }
+            return sb.toString();
+        } catch (org.springframework.dao.EmptyResultDataAccessException e) {
+            return "(no active plan)";
+        } catch (Exception e) {
+            log.debug("resolveStepsSummary failed for sessionId={}: {}", sessionId, e.getMessage());
+            return "(unavailable)";
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max - 1) + "…";
     }
 
     /**

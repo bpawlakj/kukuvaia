@@ -57,20 +57,30 @@ public class ModelRepository {
     public ModelRecord save(UUID providerId, String modelId, String displayName,
                             List<String> capabilities, String tier, int maxTokens,
                             Integer contextWindow, Instant discoveredAt) {
+        return save(providerId, modelId, displayName, capabilities, tier, maxTokens,
+                contextWindow, discoveredAt, Map.of());
+    }
+
+    public ModelRecord save(UUID providerId, String modelId, String displayName,
+                            List<String> capabilities, String tier, int maxTokens,
+                            Integer contextWindow, Instant discoveredAt,
+                            Map<String, Object> config) {
         UUID id = UUID.randomUUID();
         Instant now = Instant.now();
 
         jdbcTemplate.update("""
                 INSERT INTO kukuvaia.models
-                    (id, provider_id, model_id, display_name, capabilities, tier, max_tokens, context_window, discovered_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?)
+                    (id, provider_id, model_id, display_name, capabilities, tier, max_tokens, context_window, config, discovered_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?, ?, ?)
                 """,
                 id, providerId, modelId, displayName,
                 toJson(capabilities), tier, maxTokens, contextWindow,
+                toJsonMap(config),
                 discoveredAt != null ? Timestamp.from(discoveredAt) : null,
                 Timestamp.from(now), Timestamp.from(now));
 
-        log.info("Created model: modelId={}, providerId={}", modelId, providerId);
+        log.info("Created model: modelId={}, providerId={}, configKeys={}",
+                modelId, providerId, config != null ? config.keySet() : List.of());
         return findById(id).orElseThrow();
     }
 

@@ -8,6 +8,7 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -52,30 +53,82 @@ public class PlanningTools {
     private String currentSessionId() { return SESSION_ID.get() != null ? SESSION_ID.get() : "unknown"; }
     private String currentUserId() { return USER_ID.get() != null ? USER_ID.get() : "unknown"; }
 
-    @Tool(description = "Create a step-by-step plan for a complex task. Session and user are resolved automatically — only provide task and steps.")
+    @Tool(description = """
+            Enter planning mode for a given task. Call this WHENEVER the user expresses an intent to \
+            plan, structure, or design something — including when their message contains '/plan' \
+            anywhere in the text (not only at the start), or phrases like "let's plan X", "plan for X", \
+            "create a plan for X", "help me plan X". Apply the same rule when the user expresses this \
+            intent in a non-English language; recognise the intent semantically, not by keyword. \
+            Starts the DISCOVERY phase: the system will proactively gather requirements before drafting. \
+            Safe to call even if already in planning mode — it replaces the current planning session. \
+            Always call this BEFORE replying, so the CLI's planning toolbar appears for the user.""")
+    public Map<String, Object> startPlanning(
+            @ToolParam(description = "Short task description summarising what the user wants to plan. "
+                    + "Keep it in the user's original language so downstream rendering matches.")
+            String task) {
+        String sessionId = currentSessionId();
+        if (task == null || task.isBlank()) {
+            return Map.of("ok", false, "error", "task must not be blank");
+        }
+        planningModeService.startPlanning(sessionId, task);
+        log.info("startPlanning: sessionId={} task='{}'", sessionId, task);
+        return Map.of("ok", true, "phase", "DISCOVERY", "task", task);
+    }
+
+    @Tool(description = "Create a step-by-step plan for a complex task. Session and user are resolved "
+            + "automatically — only provide task and steps. BOTH parameters are required: never call "
+            + "this with task=null or empty steps. If you don't yet have a task summary or step list, "
+            + "ask the user rather than calling the tool.")
+    @Transactional
     public Map<String, Object> createPlan(
-            @ToolParam(description = "Task description") String task,
-            @ToolParam(description = "JSON array of step descriptions, e.g. [\"Step 1\",\"Step 2\"]") String stepsJson) {
+            @ToolParam(description = "Task description — MUST be a non-empty sentence summarising what the plan covers.")
+            String task,
+            @ToolParam(description = "JSON array of step descriptions, e.g. [\"Step 1\",\"Step 2\"]. MUST be a valid non-empty JSON array.")
+            String stepsJson) {
         String sessionId = currentSessionId();
         String userId = currentUserId();
-        log.info("createPlan: sessionId={}, userId={}, task={}", sessionId, userId, task);
 
-        // Abandon any existing draft/active plan for this session
+        // Fail-fast validation — reject bad tool calls BEFORE any DB write. Without this,
+        // a malformed call (e.g. a thinking-model that returns reasoning-only with null args)
+        // would silently abandon the user's in-flight approved plans via the UPDATE below
+        // and then fail on the NOT-NULL INSERT, leaving nothing to replace them.
+        String cleanTask = task == null ? null : task.trim();
+        String cleanSteps = stepsJson == null ? null : stepsJson.trim();
+        if (cleanTask == null || cleanTask.isEmpty()) {
+            log.warn("createPlan rejected: blank task — sessionId={}", sessionId);
+            return Map.of("created", false, "error",
+                    "task is required and must be a non-empty string. Ask the user for a task summary before calling createPlan.");
+        }
+        if (cleanSteps == null || cleanSteps.isEmpty() || !cleanSteps.startsWith("[") || !cleanSteps.endsWith("]")) {
+            log.warn("createPlan rejected: invalid stepsJson — sessionId={} starts={} ends={}",
+                    sessionId,
+                    cleanSteps == null ? "null" : cleanSteps.isEmpty() ? "empty" : cleanSteps.substring(0, Math.min(1, cleanSteps.length())),
+                    cleanSteps == null || cleanSteps.isEmpty() ? "null" : cleanSteps.substring(Math.max(0, cleanSteps.length() - 1)));
+            return Map.of("created", false, "error",
+                    "stepsJson must be a JSON array like [\"Step 1\",\"Step 2\"]. Cannot be null or empty.");
+        }
+
+        log.info("createPlan: sessionId={}, userId={}, task={}", sessionId, userId, cleanTask);
+
+        // Abandon only existing DRAFTS for this session — drafts are pre-approval, so
+        // replacing them with a new draft is the intent. We must NOT touch 'active'
+        // (approved-and-executing) or 'completed' plans — those belong to earlier
+        // planning sessions within the same chat and the user still needs them.
         jdbcTemplate.update("""
                 UPDATE kukuvaia.plans SET status = 'abandoned', updated_at = NOW()
-                WHERE session_id = ? AND status IN ('draft', 'active')
+                WHERE session_id = ? AND status = 'draft'
                 """, sessionId);
 
         // Insert as 'draft' — becomes 'active' only after user approval
         jdbcTemplate.update("""
                 INSERT INTO kukuvaia.plans (session_id, user_id, task, steps, status)
                 VALUES (?, ?, ?, ?::jsonb, 'draft')
-                """, sessionId, userId, task, stepsJson);
+                """, sessionId, userId, cleanTask, cleanSteps);
 
         // Notify planning state machine: DRAFTING → APPROVAL
         planningModeService.advanceToApproval(sessionId);
 
-        return Map.of("created", true, "task", task);
+        return Map.of("created", true, "task", cleanTask);
     }
 
     @Tool(description = "Mark a plan step as completed with a result summary. Session is resolved automatically.")

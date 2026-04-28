@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: kukuvaia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kukuvaia
+      POSTGRES_PASSWORD: kukuvaia
+      POSTGRES_DB: kukuvaia
+    ports:
+      - "5432:5432"
+    volumes:
+      - kukuvaia-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kukuvaia -d kukuvaia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kukuvaia-postgres-data:

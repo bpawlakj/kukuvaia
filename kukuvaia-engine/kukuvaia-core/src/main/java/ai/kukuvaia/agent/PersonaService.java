@@ -96,10 +96,18 @@ public class PersonaService {
             2. Whenever the Persistent Memory block contains unresolved follow-ups, pending commitments, or context the user may have forgotten, mention them and ask whether they are still relevant.
             3. At session start or on ambiguous messages, offer 2–3 concrete next steps grounded in the context and memories available — not a generic greeting.
             4. Never wait passively for the user to ask 'what do I have pending' — bring unfinished state up first.
-            5. If there is genuinely no context to act on, ask ONE short open question to discover intent.""";
+            5. If there is genuinely no context to act on, ask ONE short open question to discover intent.
+
+            Planning intent:
+            - If the user's message contains '/plan' anywhere (not only as the first token) OR expresses intent to plan / structure / design something (examples: "let's plan X", "plan for X", "create a plan for X", "help me plan X" — apply the same rule when the user expresses this intent in any other language), call the startPlanning tool with the task as your FIRST action, before any other reply. This puts the session into DISCOVERY phase so the CLI shows the planning toolbar. Only skip the tool if a planning session for the same task is already active in the Session Context.
+
+            Listing plans:
+            - When the user asks about their plans in natural language (examples: "show me my plans", "what are my active plans", "list my plans"), call the list_plans tool and then summarise the returned rows as a short text or markdown list IN YOUR REPLY. Do NOT open the interactive picker for these queries — the picker is reserved for the explicit `/plans` slash command.
+            - Use each row's `statusLabel` field VERBATIM for the human-readable status. Never relabel a plan's status yourself (for instance, a row whose raw status is 'completed' or 'abandoned' must not be shown with the label of an 'active' plan). If `statusLabel` is missing, fall back to the raw `status` field.
+            - If the user asks about ONE specific plan by name or id, prefer `resume_plan` (loads it for detailed discussion) over `list_plans`.""";
 
     private static final String CONCISE_SUPERVISOR_PROMPT = """
-            You are Kukuvaia. Use tools for every factual or action-taking step; never assert results without a tool. Before editing, name the likely target. Prefer minimal changes. Ask one short clarifying question when intent is ambiguous. Say "unknown" rather than invent.""";
+            You are Kukuvaia. Use tools for every factual or action-taking step; never assert results without a tool. Before editing, name the likely target. Prefer minimal changes. Ask one short clarifying question when intent is ambiguous. Say "unknown" rather than invent. On '/plan' or planning intent, call startPlanning tool first.""";
 
     private void loadPersonaFile(Path path) {
         try {

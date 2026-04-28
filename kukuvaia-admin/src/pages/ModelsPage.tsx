@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { models, providers, type Model, type Provider } from '../api/client';
 
-type TestStatus = 'idle' | 'testing' | 'ok' | 'failed';
+type TestStatus = 'idle' | 'testing' | 'ok' | 'needs-thinking' | 'thinking-ok' | 'failed';
+type EffortLevel = 'low' | 'medium' | 'high';
 
 export function ModelsPage() {
   const [list, setList] = useState<Model[]>([]);
@@ -13,6 +14,8 @@ export function ModelsPage() {
   const [maxTokens, setMaxTokens] = useState(4096);
   const [contextWindow, setContextWindow] = useState<number | ''>('');
   const [modelEnabled, setModelEnabled] = useState(true);
+  const [thinking, setThinking] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<EffortLevel>('medium');
   const [error, setError] = useState('');
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testInfo, setTestInfo] = useState('');
@@ -28,6 +31,7 @@ export function ModelsPage() {
   const resetForm = () => {
     setModelId(''); setDisplayName(''); setTier('standard');
     setMaxTokens(4096); setContextWindow(''); setModelEnabled(true);
+    setThinking(false); setReasoningEffort('medium');
     setTestStatus('idle'); setTestInfo('');
     setEditingId(null); setError('');
     if (providerList.length) setProviderId(providerList[0].id);
@@ -42,8 +46,56 @@ export function ModelsPage() {
     setMaxTokens(m.maxTokens);
     setContextWindow(m.contextWindow ?? '');
     setModelEnabled(m.enabled);
+    setThinking(m.config?.thinking === true);
+    const eff = m.config?.reasoning_effort;
+    setReasoningEffort(isEffort(eff) ? eff : 'medium');
     setTestStatus('idle'); setTestInfo('');
     setError('');
+  };
+
+  const buildConfig = (): Record<string, unknown> => {
+    if (!thinking) return {};
+    return { thinking: true, reasoning_effort: reasoningEffort };
+  };
+
+  const runTest = async (withThinking: boolean) => {
+    setError('');
+    setTestStatus('testing');
+    setTestInfo('');
+    const config = withThinking
+      ? { thinking: true, reasoning_effort: reasoningEffort }
+      : undefined;
+    const result = await models.test({ providerId, modelId, config });
+    if (!result.ok) {
+      setTestStatus('failed');
+      setTestInfo(result.error.message);
+      return;
+    }
+    const data = result.data;
+    if (data.status === 'ok') {
+      if (withThinking) {
+        setTestStatus('thinking-ok');
+        setThinking(true);
+        setTestInfo(`✓ Works with thinking (${data.latencyMs}ms): "${data.response}". Save the model.`);
+      } else {
+        setTestStatus('ok');
+        setTestInfo(`Model responded (${data.latencyMs}ms): "${data.response}"`);
+      }
+      return;
+    }
+    if (data.status === 'empty_content') {
+      const field = data.detectedReasoningField ?? 'reasoning';
+      if (withThinking) {
+        setTestStatus('failed');
+        setTestInfo(`Still empty content with thinking on. Reasoning field "${field}" was present but no final answer. Try higher effort or a non-thinking sibling.`);
+      } else {
+        setTestStatus('needs-thinking');
+        setTestInfo(`⚠ Empty content — model exposed "${field}" field (${data.latencyMs}ms). Likely a thinking model. Enable thinking and retry.`);
+      }
+      return;
+    }
+    setTestStatus('failed');
+    setTestInfo(data.error || 'Unknown error');
   };
 
   const handleTest = async () => {
@@ -51,22 +103,11 @@ export function ModelsPage() {
       setError('Provider and Model ID are required to test.');
       return;
     }
-    setError('');
-    setTestStatus('testing');
-    setTestInfo('');
-    const result = await models.test({ providerId, modelId });
-    if (!result.ok) {
-      setTestStatus('failed');
-      setTestInfo(result.error.message);
-      return;
-    }
-    if (result.data.status === 'ok') {
-      setTestStatus('ok');
-      setTestInfo(`Model responded (${result.data.latencyMs}ms): "${result.data.response}"`);
-    } else {
-      setTestStatus('failed');
-      setTestInfo(result.data.error || 'Unknown error');
-    }
+    await runTest(thinking);
+  };
+
+  const handleRetryWithThinking = async () => {
+    await runTest(true);
   };
 
   const handleCreate = async () => {
@@ -76,7 +117,12 @@ export function ModelsPage() {
     }
     setError('');
     setSaving(true);
-    const result = await models.create({ providerId, modelId, displayName: displayName || modelId, tier, maxTokens });
+    const result = await models.create({
+      providerId, modelId,
+      displayName: displayName || modelId,
+      tier, maxTokens,
+      config: buildConfig(),
+    });
     setSaving(false);
     if (!result.ok) {
       setError(result.error.message);
@@ -95,6 +141,7 @@ export function ModelsPage() {
       tier,
       maxTokens,
       enabled: modelEnabled,
+      config: buildConfig(),
     };
     if (contextWindow !== '') data.contextWindow = contextWindow;
     const result = await models.update(editingId, data);
@@ -124,6 +171,11 @@ export function ModelsPage() {
     }
   };
 
+  const testMessageClass =
+    testStatus === 'ok' || testStatus === 'thinking-ok' ? 'form-ok'
+    : testStatus === 'needs-thinking' ? 'form-warn'
+    : 'form-error';
+
   return (
     <>
       <h1>Models</h1>
@@ -132,7 +184,7 @@ export function ModelsPage() {
           <p className="empty">No models configured. Add a provider first, then add models.</p>
         ) : (
           <table>
-            <thead><tr><th>Display Name</th><th>Model ID</th><th>Tier</th><th>Provider</th><th>Tokens</th><th>Context</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Display Name</th><th>Model ID</th><th>Tier</th><th>Provider</th><th>Tokens</th><th>Context</th><th>Thinking</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
               {list.map(m => (
                 <tr key={m.id} className={editingId === m.id ? 'row-editing' : ''}>
@@ -142,6 +194,7 @@ export function ModelsPage() {
                   <td>{m.providerName}</td>
                   <td>{m.maxTokens}</td>
                   <td>{m.contextWindow ? `${Math.round(m.contextWindow / 1024)}K` : '-'}</td>
+                  <td>{m.config?.thinking === true ? <span className="badge badge-warn">on ({String(m.config?.reasoning_effort ?? 'medium')})</span> : <span>-</span>}</td>
                   <td><span className={`badge ${m.enabled ? 'badge-ok' : 'badge-err'}`}>{m.enabled ? 'on' : 'off'}</span></td>
                   <td style={{ display: 'flex', gap: 4 }}>
                     <button className="sm" onClick={() => handleEdit(m)}>edit</button>
@@ -178,6 +231,21 @@ export function ModelsPage() {
         </div>
         <div className="form-row">
           <div><label>Context Window</label><input type="number" value={contextWindow} onChange={e => setContextWindow(e.target.value ? Number(e.target.value) : '')} placeholder="131072" min={1} /></div>
+          <div>
+            <label>Thinking model</label>
+            <select value={thinking ? 'true' : 'false'} onChange={e => { setThinking(e.target.value === 'true'); resetTestOnChange(); }}>
+              <option value="false">off</option>
+              <option value="true">on</option>
+            </select>
+          </div>
+          <div>
+            <label>Reasoning effort</label>
+            <select value={reasoningEffort} onChange={e => { setReasoningEffort(e.target.value as EffortLevel); resetTestOnChange(); }} disabled={!thinking}>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
           {editingId && (
             <div><label>Enabled</label>
               <select value={modelEnabled ? 'true' : 'false'} onChange={e => setModelEnabled(e.target.value === 'true')}>
@@ -186,11 +254,18 @@ export function ModelsPage() {
               </select>
             </div>
           )}
-          <div><label>&nbsp;</label>
-            <div style={{ display: 'flex', gap: 6 }}>
+        </div>
+        <div className="form-row">
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               <button onClick={handleTest} disabled={testStatus === 'testing'}>
                 {testStatus === 'testing' ? 'Testing...' : 'Test'}
               </button>
+              {testStatus === 'needs-thinking' && (
+                <button className="secondary" onClick={handleRetryWithThinking}>
+                  Retry with thinking
+                </button>
+              )}
               {editingId ? (
                 <>
                   <button onClick={handleUpdate} disabled={saving}>
@@ -207,11 +282,15 @@ export function ModelsPage() {
           </div>
         </div>
         {testInfo && (
-          <p className={testStatus === 'ok' ? 'form-ok' : 'form-error'}>{testInfo}</p>
+          <p className={testMessageClass}>{testInfo}</p>
         )}
       </div>
     </>
   );
+}
+
+function isEffort(v: unknown): v is EffortLevel {
+  return v === 'low' || v === 'medium' || v === 'high';
 }
 
 function tierBadge(tier: string) {

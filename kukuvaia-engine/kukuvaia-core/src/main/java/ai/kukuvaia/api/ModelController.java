@@ -38,10 +38,14 @@ public class ModelController {
         String tier = (String) body.getOrDefault("tier", "standard");
         int maxTokens = body.containsKey("maxTokens") ? ((Number) body.get("maxTokens")).intValue() : 4096;
         Integer contextWindow = body.containsKey("contextWindow") ? ((Number) body.get("contextWindow")).intValue() : null;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> config = body.get("config") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m
+                : Map.of();
 
         try {
             var model = registryService.createModel(providerId, modelId,
-                    (String) body.get("displayName"), capabilities, tier, maxTokens, contextWindow);
+                    (String) body.get("displayName"), capabilities, tier, maxTokens, contextWindow, config);
             return ResponseEntity.status(HttpStatus.CREATED).body(ModelResponse.from(model, "unknown"));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().build();
@@ -49,19 +53,31 @@ public class ModelController {
     }
 
     @PostMapping("/test")
-    public ResponseEntity<?> testModel(@RequestBody Map<String, String> body) {
-        String providerIdStr = body.get("providerId");
-        String modelId = body.get("modelId");
+    public ResponseEntity<?> testModel(@RequestBody Map<String, Object> body) {
+        String providerIdStr = (String) body.get("providerId");
+        String modelId = (String) body.get("modelId");
         if (providerIdStr == null || modelId == null || modelId.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "providerId and modelId are required"));
         }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> config = body.get("config") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m
+                : Map.of();
         try {
             UUID providerId = UUID.fromString(providerIdStr);
-            ModelTestResult result = registryService.testModel(providerId, modelId);
-            return ResponseEntity.ok(Map.of(
-                    "status", "ok",
-                    "latencyMs", result.latencyMs(),
-                    "response", result.response()));
+            ModelTestResult result = registryService.testModel(providerId, modelId, config);
+            var payload = new java.util.LinkedHashMap<String, Object>();
+            payload.put("status", result.emptyContent() ? "empty_content" : "ok");
+            payload.put("latencyMs", result.latencyMs());
+            payload.put("response", result.response());
+            payload.put("emptyContent", result.emptyContent());
+            if (result.detectedReasoningField() != null) {
+                payload.put("detectedReasoningField", result.detectedReasoningField());
+            }
+            if (!result.suggestedConfig().isEmpty()) {
+                payload.put("suggestedConfig", result.suggestedConfig());
+            }
+            return ResponseEntity.ok(payload);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.ok(Map.of("status", "failed", "error", e.getMessage()));
         } catch (ModelDiscoveryClient.ModelDiscoveryException e) {

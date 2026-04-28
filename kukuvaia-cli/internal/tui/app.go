@@ -32,11 +32,26 @@ type message struct {
 type elapsedTickMsg struct{}
 
 // planToolbar tracks the planning mode action bar state.
+// Number of actions depends on phase:
+//   - discovery: 2 (Create plan, Add feedback)
+//   - approval:  3 (Approve plan, Request changes, Mark done)
+//   - executing: 2 (Mark done, Add feedback)
 type planToolbar struct {
 	active   bool   // true when showing toolbar
-	phase    string // "discovery" or "approval"
-	selected int    // 0 = primary action, 1 = secondary action
+	phase    string // "discovery" | "approval" | "executing"
+	selected int    // 0..N-1 — index into the phase's action list
 	editing  bool   // true when user is typing in input
+}
+
+// planToolbarActionCount returns how many actions the current phase exposes.
+func planToolbarActionCount(phase string) int {
+	switch phase {
+	case "approval":
+		return 3
+	case "discovery", "executing":
+		return 2
+	}
+	return 2
 }
 
 // Model is the root Bubbletea model.
@@ -175,7 +190,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("[UPDATE] WindowSizeMsg: %dx%d", msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
-		inputHeight := 4 // bordered input box (3 lines) + gap
 		// Constrain textinput width so the content scrolls horizontally inside
 		// the box instead of wrapping and growing the box vertically.
 		// InputBoxFocusedStyle: Border(2) + Padding(0,1)(2) → inner = width - 4.
@@ -183,22 +197,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Width > 10 {
 			m.input.Width = msg.Width - 6
 		}
+		// Use the same height derivation View() uses so the viewport model's
+		// YOffset math stays in sync with the actual render.
+		vpHeight := m.effectiveViewportHeight()
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, msg.Height-inputHeight)
+			m.viewport = viewport.New(msg.Width, vpHeight)
 			m.viewport.SetContent(m.renderMessages())
 			m.ready = true
 		} else {
 			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - inputHeight
+			m.viewport.Height = vpHeight
 		}
+
+	case tea.MouseMsg:
+		// Forward mouse wheel (and other mouse) events to the viewport so the
+		// chat history scrolls with the trackpad / wheel. Bubbles' viewport
+		// recognises MouseWheelUp / MouseWheelDown natively.
+		if m.ready {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		// Planning toolbar key handling (when active and not editing)
 		if m.planning.active && !m.planning.editing && !m.waiting {
 			key := msg.String()
 			switch key {
-			case "tab", "shift+tab", "left", "right":
-				m.planning.selected = 1 - m.planning.selected
+			case "tab", "right":
+				count := planToolbarActionCount(m.planning.phase)
+				m.planning.selected = (m.planning.selected + 1) % count
+				return m, nil
+			case "shift+tab", "left":
+				count := planToolbarActionCount(m.planning.phase)
+				m.planning.selected = (m.planning.selected - 1 + count) % count
 				return m, nil
 			case "enter":
 				return m, m.handlePlanToolbarAction()
@@ -371,11 +404,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.planPicker.filter = pb.StatusFilter
 				m.showPlanPicker = true
 			}
-			m.messages = append(m.messages, message{
-				role:             "assistant",
-				blocks:           msg.blocks,
-				activitySnapshot: snapshot,
-			})
+			// Strip the phase-only MetadataBlock out of chat history — it is a
+			// control signal consumed below by syncPlanningFromServer, not user-
+			// facing content. Other metadata blocks still render normally.
+			visibleBlocks := stripPlanningPhaseMetadata(msg.blocks)
+			if len(visibleBlocks) > 0 {
+				m.messages = append(m.messages, message{
+					role:             "assistant",
+					blocks:           visibleBlocks,
+					activitySnapshot: snapshot,
+				})
+			} else if snapshot != "" {
+				m.messages = append(m.messages, message{
+					role:             "assistant",
+					activitySnapshot: snapshot,
+				})
+			}
 		} else if snapshot != "" {
 			// Pure tool-only turn (no assistant text) — still show the activity.
 			m.messages = append(m.messages, message{
@@ -386,22 +430,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("[UPDATE]   no blocks and no error — empty response")
 		}
 
-		// Planning toolbar transitions:
-		// After "gotowe" response → show approval toolbar
-		// After "Add feedback" response in discovery → re-show discovery toolbar
-		if m.planning.phase == "drafting" {
-			m.planning = planToolbar{active: true, phase: "approval", selected: 0}
-			log.Printf("[UPDATE] planning toolbar: → approval")
-		} else if m.planning.phase == "discovery" && !m.planning.active {
-			// Was in discovery, toolbar was hidden during feedback send — re-show
-			m.planning.active = true
-			m.planning.editing = false
-			m.planning.selected = 0
-		} else if m.planning.phase == "approval" && m.planning.editing {
-			// Was editing changes in approval — after send, show approval toolbar again
-			m.planning.active = true
-			m.planning.editing = false
-			m.planning.selected = 0
+		// Planning toolbar sync — authoritative signal from the server.
+		// AgentService emits a MetadataBlock with kukuvaia.planning.phase at
+		// the end of every chat turn while a session is in planning mode.
+		// The CLI rebuilds the toolbar from this single source of truth,
+		// replacing the previous brittle local phase tracking that missed
+		// LLM-initiated transitions (DISCOVERY → DRAFTING → APPROVAL in one turn).
+		if phase := extractPlanningPhase(msg.blocks); phase != "" {
+			m.syncPlanningFromServer(phase)
+		} else if m.planning.active || m.planning.phase != "" {
+			// Server says "no longer in planning mode" (no metadata block) —
+			// drop the toolbar so the user gets a clean prompt back.
+			log.Printf("[UPDATE] planning mode exited (no phase metadata) — clearing toolbar")
+			m.planning = planToolbar{}
 		}
 
 		contentLen := len(m.renderMessages())
@@ -485,6 +526,73 @@ func findPlanListBlock(blocks []api.OutputBlock) *api.PlanListBlock {
 		}
 	}
 	return nil
+}
+
+// planningPhaseKey mirrors AgentService.PLANNING_PHASE_KEY on the server.
+const planningPhaseKey = "kukuvaia.planning.phase"
+
+// extractPlanningPhase scans blocks for the server-emitted MetadataBlock
+// carrying {planningPhaseKey: "<phase>"} and returns the lowercase phase
+// name. Empty string means no metadata block was present (session is not
+// in planning mode).
+func extractPlanningPhase(blocks []api.OutputBlock) string {
+	for _, b := range blocks {
+		mb, ok := b.(api.MetadataBlock)
+		if !ok {
+			continue
+		}
+		if v, present := mb.Metadata[planningPhaseKey]; present {
+			if s, isStr := v.(string); isStr {
+				return strings.ToLower(strings.TrimSpace(s))
+			}
+		}
+	}
+	return ""
+}
+
+// stripPlanningPhaseMetadata returns a new slice with MetadataBlocks that
+// only carry the planning-phase control key removed — those are consumed
+// by syncPlanningFromServer and should NOT appear in the chat viewport.
+// Other MetadataBlocks (with additional keys) pass through untouched.
+func stripPlanningPhaseMetadata(blocks []api.OutputBlock) []api.OutputBlock {
+	out := make([]api.OutputBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if mb, ok := b.(api.MetadataBlock); ok {
+			if len(mb.Metadata) == 1 {
+				if _, phaseOnly := mb.Metadata[planningPhaseKey]; phaseOnly {
+					continue
+				}
+			}
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// syncPlanningFromServer rebuilds the local plan-toolbar state from the
+// authoritative phase string emitted by the server. Each phase has its own
+// toolbar preset (or no toolbar at all) so the UI reflects exactly what the
+// server state machine is doing.
+func (m *Model) syncPlanningFromServer(phase string) {
+	switch phase {
+	case "discovery":
+		m.planning = planToolbar{active: true, phase: "discovery", selected: 0}
+	case "drafting":
+		// Transient — server usually advances DRAFTING → APPROVAL within a
+		// single createPlan tool-call; we keep the state but hide the toolbar.
+		m.planning = planToolbar{active: false, phase: "drafting"}
+	case "approval":
+		m.planning = planToolbar{active: true, phase: "approval", selected: 0}
+	case "executing":
+		// Toolbar offers Mark done + Add feedback — user can either close the
+		// plan or send a free-text progress update (which the LLM may act on
+		// via completeStep).
+		m.planning = planToolbar{active: true, phase: "executing", selected: 0}
+	default:
+		log.Printf("[UPDATE] unknown planning phase from server: %q — leaving toolbar unchanged", phase)
+		return
+	}
+	log.Printf("[UPDATE] planning toolbar synced from server: phase=%s active=%t", phase, m.planning.active)
 }
 
 // extractResumedPhase scans TextBlock content for the server's phase-reporting
@@ -618,13 +726,50 @@ func (m Model) View() string {
 		return "Initializing..."
 	}
 
+	bottom := m.buildBottom()
+	vp := m.viewport
+	vp.Height = viewportHeightFor(m.height, bottom)
+	// Do NOT auto-scroll here — user's pgup/arrow navigation must survive
+	// re-renders. Scroll-to-bottom happens explicitly in Update() on new
+	// messages (see enter handler and chatResultMsg).
+	return vp.View() + bottom
+}
+
+// effectiveViewportHeight returns the viewport height that View() will use
+// given the current model state. Update handlers call this before GotoBottom
+// so the scroll anchor matches the actual render size. Computed from the
+// exact same `bottom` string View() renders, to guarantee consistency — any
+// formula drift here caused visible jumps while typing and clipped last lines
+// after GotoBottom.
+func (m Model) effectiveViewportHeight() int {
+	return viewportHeightFor(m.height, m.buildBottom())
+}
+
+// viewportHeightFor returns the number of rows left for the scrollable chat
+// viewport given the total terminal height and the rendered bottom string.
+// Rationale for the formula: total rendered rows = vp.View() rows + '\n' count
+// of bottom (vp.View() has no trailing '\n', so each '\n' in bottom adds exactly
+// one rendered row). To fill the terminal we need vp.Height = terminalHeight -
+// newlineCount(bottom).
+func viewportHeightFor(terminalHeight int, bottom string) int {
+	h := terminalHeight - strings.Count(bottom, "\n")
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// buildBottom constructs the string rendered below the chat viewport: activity
+// tree + spinner when waiting, planning toolbar when applicable, planning
+// badge and input box. Kept as a single helper so View() and
+// effectiveViewportHeight() never disagree on its shape (the earlier split
+// between the two produced a 1-row mismatch and glitchy scrolling while
+// typing).
+func (m Model) buildBottom() string {
 	w := m.width
 	if w < 20 {
 		w = 80
 	}
-
-	// Input box — bordered like Claude Code prompt area. Border flips to yellow
-	// when a /plan flow is active so the user always knows which mode they're in.
 	inputBoxWidth := w - 2
 	if inputBoxWidth < 10 {
 		inputBoxWidth = 10
@@ -635,9 +780,6 @@ func (m Model) View() string {
 	}
 	inputBox := inputBoxStyle.Width(inputBoxWidth).Render(m.input.View())
 
-	// Planning badge — rendered above the input (or toolbar) so the phase is
-	// always visible. Adds exactly one extra line; effectiveViewportHeight()
-	// compensates.
 	planningBadge := ""
 	if m.isPlanning() {
 		phase := strings.ToUpper(m.planning.phase)
@@ -648,12 +790,8 @@ func (m Model) View() string {
 			"  " + MutedStyle.Render("(ctrl+p to exit)")
 	}
 
-	// Build the bottom region string first so we can count its height and
-	// resize the viewport dynamically. Otherwise a growing activity tree
-	// pushes the latest user message off the top of the screen.
 	// Convention: bottom starts with "\n\n" (blank visual separator) so the
 	// last content line is never touching the input/toolbar frame.
-	bottom := ""
 	switch {
 	case m.waiting:
 		elapsed := time.Since(m.waitStart).Truncate(time.Second)
@@ -662,65 +800,28 @@ func (m Model) View() string {
 		if !m.activity.IsIdle() {
 			activityLine = indentLines(m.activity.View(), "  ") + "\n"
 		}
-		bottom = "\n\n" + activityLine + spinnerLine + "\n"
+		bottom := "\n\n" + activityLine + spinnerLine + "\n"
 		if planningBadge != "" {
 			bottom += planningBadge + "\n"
 		}
 		bottom += inputBox
+		return bottom
 	case m.planning.active && !m.planning.editing:
 		toolbar := renderPlanToolbar(m.planning.phase, m.planning.selected, inputBoxWidth)
-		bottom = "\n\n"
+		bottom := "\n\n"
 		if planningBadge != "" {
 			bottom += planningBadge + "\n"
 		}
 		bottom += toolbar + "\n"
+		return bottom
 	default:
-		bottom = "\n\n"
+		bottom := "\n\n"
 		if planningBadge != "" {
 			bottom += planningBadge + "\n"
 		}
 		bottom += inputBox
+		return bottom
 	}
-
-	bottomLines := strings.Count(bottom, "\n") + 1
-	vp := m.viewport
-	vp.Height = m.height - bottomLines
-	if vp.Height < 1 {
-		vp.Height = 1
-	}
-	// Do NOT auto-scroll here — user's pgup/arrow navigation must survive
-	// re-renders. Scroll-to-bottom happens explicitly in Update() on new
-	// messages (see enter handler and chatResultMsg).
-	return vp.View() + bottom
-}
-
-// effectiveViewportHeight returns the viewport height that View() will use
-// given the current model state. Update handlers call this before GotoBottom
-// so the scroll anchor matches the actual render size.
-// Must stay in sync with the `bottom` block construction in View().
-func (m Model) effectiveViewportHeight() int {
-	// Default idle: blank gap (1) + inputBox (3) = 4 rows.
-	// The leading "\n\n" in bottom expands to: line break + blank line = 2 rows,
-	// but when concatenated after viewport.View() (which does not end in \n),
-	// we get exactly 1 blank separator row. Add inputBox (3) = 4.
-	h := m.height - 4
-	if m.waiting {
-		// Waiting adds spinner (1) + gap (1) = 2 extra rows.
-		h -= 2
-		if !m.activity.IsIdle() {
-			// Activity tree occupies its own line count + trailing newline.
-			lines := strings.Count(m.activity.View(), "\n") + 2
-			h -= lines
-		}
-	}
-	if m.isPlanning() {
-		// Planning badge adds exactly one line above the input.
-		h -= 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	return h
 }
 
 // chatResultMsg carries all non-span blocks from a completed chat response.
@@ -878,16 +979,16 @@ func renderUserMessage(text string, width int) string {
 func (m *Model) handlePlanToolbarAction() tea.Cmd {
 	if m.planning.phase == "discovery" {
 		if m.planning.selected == 0 {
-			// "Create plan" → send "gotowe", mark as drafting for response detection
+			// "Create plan" → send "ready", mark as drafting for response detection
 			m.planning.active = false
 			m.planning.phase = "drafting"
-			m.messages = append(m.messages, message{role: "user", text: "gotowe"})
+			m.messages = append(m.messages, message{role: "user", text: "ready"})
 			m.waiting = true
 			m.waitStart = time.Now()
-			log.Printf("[UPDATE] planning toolbar: Create plan → sending 'gotowe'")
+			log.Printf("[UPDATE] planning toolbar: Create plan → sending 'ready'")
 			m.viewport.SetContent(m.renderMessages())
 			m.viewport.GotoBottom()
-			return tea.Batch(m.sendChat("gotowe"), tickElapsed())
+			return tea.Batch(m.sendChat("ready"), tickElapsed())
 		}
 		// "Add feedback" → switch to text input
 		m.planning.editing = true
@@ -895,22 +996,64 @@ func (m *Model) handlePlanToolbarAction() tea.Cmd {
 		return nil
 	}
 
-	if m.planning.phase == "approval" {
-		if m.planning.selected == 0 {
-			// "Approve plan" → send "tak", exit planning mode
+	if m.planning.phase == "executing" {
+		switch m.planning.selected {
+		case 0:
+			// "Mark done" → /plan done. Server closes the plan (status='completed',
+			// phase='done') and drops the session; no phase metadata on next turn
+			// so the CLI clears the toolbar via the "no metadata" branch.
 			m.planning = planToolbar{}
-			m.messages = append(m.messages, message{role: "user", text: "tak"})
+			m.messages = append(m.messages, message{role: "user", text: "/plan done"})
 			m.waiting = true
 			m.waitStart = time.Now()
-			log.Printf("[UPDATE] planning toolbar: Approve plan → sending 'tak'")
+			log.Printf("[UPDATE] planning toolbar: Mark done (executing) → sending '/plan done'")
 			m.viewport.SetContent(m.renderMessages())
 			m.viewport.GotoBottom()
-			return tea.Batch(m.sendChat("tak"), tickElapsed())
+			return tea.Batch(m.sendChat("/plan done"), tickElapsed())
+		case 1:
+			// "Add feedback" → open input. User types progress ("zrobiłem krok 1"
+			// / "skip step 2" / …); LLM sees it in EXECUTING-phase prompt and may
+			// call completeStep or respond plainly. Server re-emits phase=executing
+			// → syncPlanningFromServer restores the toolbar on response.
+			m.planning.editing = true
+			m.input.Focus()
+			return nil
 		}
-		// "Request changes" → switch to text input
-		m.planning.editing = true
-		m.planning.phase = "drafting" // will transition back to approval after response
-		m.input.Focus()
+		return nil
+	}
+
+	if m.planning.phase == "approval" {
+		switch m.planning.selected {
+		case 0:
+			// "Approve plan" → send "tak"; server advances APPROVAL → EXECUTING
+			// (planToolbar stays active on the server side — see step 2 server change).
+			m.planning = planToolbar{}
+			m.messages = append(m.messages, message{role: "user", text: "approve"})
+			m.waiting = true
+			m.waitStart = time.Now()
+			log.Printf("[UPDATE] planning toolbar: Approve plan → sending 'approve'")
+			m.viewport.SetContent(m.renderMessages())
+			m.viewport.GotoBottom()
+			return tea.Batch(m.sendChat("approve"), tickElapsed())
+		case 1:
+			// "Request changes" → switch to text input
+			m.planning.editing = true
+			m.planning.phase = "drafting" // will transition back to approval after response
+			m.input.Focus()
+			return nil
+		case 2:
+			// "Mark done" → send /plan done; closes the plan in one step for
+			// users who resumed an already-approved (status='active') plan.
+			// For a draft plan the server returns "No active plan to close".
+			m.planning = planToolbar{}
+			m.messages = append(m.messages, message{role: "user", text: "/plan done"})
+			m.waiting = true
+			m.waitStart = time.Now()
+			log.Printf("[UPDATE] planning toolbar: Mark done → sending '/plan done'")
+			m.viewport.SetContent(m.renderMessages())
+			m.viewport.GotoBottom()
+			return tea.Batch(m.sendChat("/plan done"), tickElapsed())
+		}
 		return nil
 	}
 
@@ -919,30 +1062,31 @@ func (m *Model) handlePlanToolbarAction() tea.Cmd {
 
 // renderPlanToolbar renders the planning mode action bar on a single line.
 func renderPlanToolbar(phase string, selected int, width int) string {
-	var primaryLabel, secondaryLabel string
-	if phase == "approval" {
-		primaryLabel = "Approve plan"
-		secondaryLabel = "Request changes"
-	} else {
-		primaryLabel = "Create plan"
-		secondaryLabel = "Add feedback"
+	var labels []string
+	switch phase {
+	case "approval":
+		labels = []string{"Approve plan", "Request changes", "Mark done"}
+	case "executing":
+		labels = []string{"Mark done", "Add feedback"}
+	default: // discovery
+		labels = []string{"Create plan", "Add feedback"}
 	}
 
 	active := lipgloss.NewStyle().Bold(true).
 		Foreground(lipgloss.Color("#000000")).Background(ColorPrimary)
 	inactive := lipgloss.NewStyle().Foreground(ColorMuted)
 
-	var primary, secondary string
-	if selected == 0 {
-		primary = active.Render(" " + primaryLabel + " ")
-		secondary = inactive.Render("[" + secondaryLabel + "]")
-	} else {
-		primary = inactive.Render("[" + primaryLabel + "]")
-		secondary = active.Render(" " + secondaryLabel + " ")
+	var parts []string
+	for i, label := range labels {
+		if i == selected {
+			parts = append(parts, active.Render(" "+label+" "))
+		} else {
+			parts = append(parts, inactive.Render("["+label+"]"))
+		}
 	}
 
 	hint := MutedStyle.Render("tab/← → · enter")
-	return "  " + primary + "  " + secondary + "  " + hint
+	return "  " + strings.Join(parts, "  ") + "  " + hint
 }
 
 // isInputSafe returns true if the message should be forwarded to textinput.
@@ -1007,7 +1151,11 @@ func Run(client *api.Client, sessionID string) error {
 	}
 
 	m := NewModel(client, sessionID)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// WithMouseCellMotion forwards mouse events (including wheel) to the model.
+	// Bubbles' viewport handles MouseWheel up/down natively — restores native
+	// iTerm2-style scroll inside the alt-screen TUI. Text selection with drag
+	// now requires Option (macOS) / Shift (Linux) — standard across vim, k9s, lazygit.
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }

@@ -44,7 +44,13 @@ public class ChatModelFactory {
      * @throws SecretResolver.SecretNotFoundException if the API key reference cannot be resolved
      */
     public ChatModel create(ProviderRecord provider, ModelRecord model) {
+        log.info("[factory] Building ChatModel: provider.name={} provider.baseUrl={} provider.type={} " +
+                        "model.modelId={} model.displayName={} model.tier={} model.maxTokens={} model.config={}",
+                provider.name(), provider.baseUrl(), provider.type(),
+                model.modelId(), model.displayName(), model.tier(), model.maxTokens(), model.config());
         String apiKey = secretResolver.resolve(provider.apiKeyRef());
+        log.debug("[factory] apiKeyRef resolved (length={} first4={}…)", apiKey.length(),
+                apiKey.length() >= 4 ? apiKey.substring(0, 4) : apiKey);
 
         var requestFactory = new ReactorClientHttpRequestFactory();
         requestFactory.setConnectTimeout(Duration.ofSeconds(connectTimeoutSeconds));
@@ -60,23 +66,35 @@ public class ChatModelFactory {
                 .build();
 
         double temperature = extractDouble(model.config(), "temperature", 0.2);
+        boolean thinking = Boolean.TRUE.equals(model.config().get("thinking"));
+        String reasoningEffort = thinking ? extractString(model.config(), "reasoning_effort", "medium") : null;
 
-        OpenAiChatOptions options = OpenAiChatOptions.builder()
+        OpenAiChatOptions.Builder optionsBuilder = OpenAiChatOptions.builder()
                 .model(model.modelId())
                 .maxTokens(model.maxTokens())
                 .temperature(temperature)
-                .internalToolExecutionEnabled(false)
-                .build();
+                .internalToolExecutionEnabled(false);
+        if (reasoningEffort != null) {
+            optionsBuilder.reasoningEffort(reasoningEffort);
+        }
+        OpenAiChatOptions options = optionsBuilder.build();
 
         ChatModel chatModel = OpenAiChatModel.builder()
                 .openAiApi(openAiApi)
                 .defaultOptions(options)
                 .build();
 
-        log.info("Created ChatModel: provider={}, model={}, maxTokens={}, temperature={}",
-                provider.name(), model.modelId(), model.maxTokens(), temperature);
+        log.info("Created ChatModel: provider={}, model={}, maxTokens={}, temperature={}, thinking={}, reasoningEffort={}",
+                provider.name(), model.modelId(), model.maxTokens(), temperature,
+                thinking, reasoningEffort);
 
         return chatModel;
+    }
+
+    private String extractString(java.util.Map<String, Object> config, String key, String defaultValue) {
+        if (config == null || !config.containsKey(key)) return defaultValue;
+        Object value = config.get(key);
+        return value != null ? value.toString() : defaultValue;
     }
 
     private double extractDouble(java.util.Map<String, Object> config, String key, double defaultValue) {

@@ -5,11 +5,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
+import org.springframework.ai.chat.memory.repository.jdbc.JdbcChatMemoryRepository;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.transformers.TransformersEmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -37,6 +39,19 @@ public class MemoryModuleConfig {
      */
     @Value("${kukuvaia.chat.memory.max-messages:100}")
     private int maxMessages;
+
+    /**
+     * Wraps the auto-configured JDBC repository with a sanitizer that rewrites
+     * null / blank assistant content to a placeholder before INSERT — avoids
+     * violating the NOT NULL constraint on {@code SPRING_AI_CHAT_MEMORY.content}
+     * when thinking models return reasoning-only responses.
+     */
+    @Bean
+    @Primary
+    ChatMemoryRepository sanitizingChatMemoryRepository(JdbcChatMemoryRepository delegate) {
+        log.info("ChatMemoryRepository wrapped with SanitizingChatMemoryRepository (null-content guard).");
+        return new SanitizingChatMemoryRepository(delegate);
+    }
 
     @Bean
     ChatMemory chatMemory(ChatMemoryRepository chatMemoryRepository) {

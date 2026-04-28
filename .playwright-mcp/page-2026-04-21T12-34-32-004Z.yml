@@ -1,0 +1,66 @@
+- generic [ref=e2]:
+  - navigation [ref=e3]:
+    - link "Dashboard" [ref=e4] [cursor=pointer]:
+      - /url: /
+    - link "Providers" [ref=e5] [cursor=pointer]:
+      - /url: /providers
+    - link "Models" [ref=e6] [cursor=pointer]:
+      - /url: /models
+    - link "Roles" [ref=e7] [cursor=pointer]:
+      - /url: /roles
+    - link "Dreaming" [ref=e8] [cursor=pointer]:
+      - /url: /dream
+  - main [ref=e9]:
+    - heading "Dashboard" [level=1] [ref=e10]
+    - table [ref=e12]:
+      - rowgroup [ref=e13]:
+        - row "Providers Models Roles Cached Groups Rule Sets Pending Recs" [ref=e14]:
+          - columnheader "Providers" [ref=e15]
+          - columnheader "Models" [ref=e16]
+          - columnheader "Roles" [ref=e17]
+          - columnheader "Cached" [ref=e18]
+          - columnheader "Groups" [ref=e19]
+          - columnheader "Rule Sets" [ref=e20]
+          - columnheader "Pending Recs" [ref=e21]
+      - rowgroup [ref=e22]:
+        - row "1 1 1 1 0 0 0" [ref=e23]:
+          - cell "1" [ref=e24]
+          - cell "1" [ref=e25]
+          - cell "1" [ref=e26]
+          - cell "1" [ref=e27]
+          - cell "0" [ref=e28]
+          - cell "0" [ref=e29]
+          - cell "0" [ref=e30]
+    - generic [ref=e31]:
+      - heading "Active Roles" [level=2] [ref=e32]
+      - table [ref=e33]:
+        - rowgroup [ref=e34]:
+          - row "Role Model Tier Provider" [ref=e35]:
+            - columnheader "Role" [ref=e36]
+            - columnheader "Model" [ref=e37]
+            - columnheader "Tier" [ref=e38]
+            - columnheader "Provider" [ref=e39]
+        - rowgroup [ref=e40]:
+          - row "supervisor eu.anthropic.claude-sonnet-4-5-20250929-v1:0 standard default" [ref=e41]:
+            - cell "supervisor" [ref=e42]:
+              - strong [ref=e43]: supervisor
+            - cell "eu.anthropic.claude-sonnet-4-5-20250929-v1:0" [ref=e44]
+            - cell "standard" [ref=e45]:
+              - generic [ref=e46]: standard
+            - cell "default" [ref=e47]
+    - generic [ref=e48]:
+      - heading "Providers" [level=2] [ref=e49]
+      - table [ref=e50]:
+        - rowgroup [ref=e51]:
+          - row "Name Type Models Status" [ref=e52]:
+            - columnheader "Name" [ref=e53]
+            - columnheader "Type" [ref=e54]
+            - columnheader "Models" [ref=e55]
+            - columnheader "Status" [ref=e56]
+        - rowgroup [ref=e57]:
+          - row "default custom 1 active" [ref=e58]:
+            - cell "default" [ref=e59]
+            - cell "custom" [ref=e60]
+            - cell "1" [ref=e61]
+            - cell "active" [ref=e62]:
+              - generic [ref=e63]: active

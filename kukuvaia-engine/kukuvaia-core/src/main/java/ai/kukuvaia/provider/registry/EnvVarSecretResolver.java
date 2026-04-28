@@ -3,20 +3,24 @@ package ai.kukuvaia.provider.registry;
 import org.springframework.stereotype.Component;
 
 /**
- * Resolves secret references by reading environment variables — fail-fast.
+ * Dual-mode secret resolver.
  *
- * <p>Contract per {@link SecretResolver#resolve(String)}: the reference is
- * an env-var name; if the variable is unset, blank, or the reference is
- * otherwise invalid, {@link SecretNotFoundException} is thrown. There is
- * intentionally no "fall back to treating the reference as a raw token"
- * branch — that silently hid misconfiguration in production (ops forgets
- * to set an env var and the code happily uses the variable NAME as the
- * API key, then outbound LLM calls fail with an opaque 401). The
- * {@code credentials.md} standard requires env-only secret loading, so
- * the safe behaviour is to refuse to start rather than limp along.
+ * <p>If the reference matches the env-var identifier regex
+ * ({@code ^[A-Za-z_][A-Za-z0-9_]*$}), it is treated as an env-var NAME
+ * and resolved via {@link System#getenv(String)} (fail-fast when unset or
+ * blank — see below). Otherwise the reference is returned verbatim as a
+ * literal secret. JWTs and other tokens contain characters (".", "-",
+ * "/") that never appear in a valid env-var name, so the two cases are
+ * unambiguous by format.
  *
- * <p>Trimming is tolerated so surrounding whitespace in a DB-stored
- * reference is not an operational hazard.
+ * <p>The fail-fast branch for env-var names still matters: it prevents
+ * the silent "use the variable NAME as the API key" failure mode (ops
+ * forgets to export, outbound LLM calls 401 with no useful signal).
+ *
+ * <p>Literal-token mode is a stopgap so the admin UI can store a key
+ * directly in the providers table. Plaintext storage is acceptable only
+ * while an encryption-at-rest solution (pgcrypto / Jasypt) is pending;
+ * see {@code .maister/docs/standards/security/credentials.md}.
  */
 @Component
 public class EnvVarSecretResolver implements SecretResolver {
@@ -33,7 +37,7 @@ public class EnvVarSecretResolver implements SecretResolver {
         String trimmed = reference.trim();
 
         if (!ENV_VAR_NAME.matcher(trimmed).matches()) {
-            throw new SecretNotFoundException(trimmed);
+            return trimmed;
         }
 
         String value = System.getenv(trimmed);

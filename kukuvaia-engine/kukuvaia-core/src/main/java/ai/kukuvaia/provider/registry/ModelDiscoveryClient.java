@@ -91,23 +91,45 @@ public class ModelDiscoveryClient {
         return System.currentTimeMillis() - start;
     }
 
+    /** Reasoning field aliases known across OpenAI-compatible providers. */
+    private static final List<String> REASONING_FIELDS =
+            List.of("reasoning", "reasoning_content", "thinking", "think", "thought");
+
     /**
      * Test a specific model by sending a minimal chat completion request.
      *
-     * @return test result with latency and response text
+     * @return test result with latency, response text, and a thinking-detection signal
      * @throws ModelDiscoveryException on connection, auth, or model errors
      */
     public ModelTestResult testModel(String baseUrl, String apiKey, String modelId) {
+        return testModel(baseUrl, apiKey, modelId, Map.of());
+    }
+
+    /**
+     * Test a specific model with optional extra config (e.g. {@code thinking=true},
+     * {@code reasoning_effort=medium}). When {@code thinking} is set the request
+     * includes {@code reasoning: {effort: ...}} so thinking models return both
+     * reasoning and final content per OpenRouter's convention.
+     */
+    public ModelTestResult testModel(String baseUrl, String apiKey, String modelId,
+                                     Map<String, Object> config) {
         String url = normalizeUrl(baseUrl) + "/v1/chat/completions";
-        log.info("Testing model {} at: {}", modelId, url);
+        log.info("Testing model {} at: {} (config keys: {})", modelId, url,
+                config != null ? config.keySet() : List.of());
+
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("model", modelId);
+        body.put("messages", List.of(Map.of("role", "user", "content", "Say hello in one word.")));
+        body.put("max_tokens", config != null && Boolean.TRUE.equals(config.get("thinking")) ? 2048 : 10);
+
+        if (config != null && Boolean.TRUE.equals(config.get("thinking"))) {
+            Object effort = config.getOrDefault("reasoning_effort", "medium");
+            body.put("reasoning", Map.of("effort", effort));
+        }
 
         String requestBody;
         try {
-            requestBody = objectMapper.writeValueAsString(Map.of(
-                    "model", modelId,
-                    "messages", List.of(Map.of("role", "user", "content", "Say hello in one word.")),
-                    "max_tokens", 10
-            ));
+            requestBody = objectMapper.writeValueAsString(body);
         } catch (Exception e) {
             throw new ModelDiscoveryException("Failed to build test request: " + e.getMessage());
         }
@@ -119,7 +141,7 @@ public class ModelDiscoveryClient {
                     .header("Authorization", "Bearer " + apiKey)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
-                    .timeout(Duration.ofSeconds(30))
+                    .timeout(Duration.ofSeconds(60))
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
 
@@ -127,10 +149,7 @@ public class ModelDiscoveryClient {
             long latencyMs = System.currentTimeMillis() - start;
 
             return switch (response.statusCode()) {
-                case 200 -> {
-                    String text = extractChatResponse(response.body());
-                    yield new ModelTestResult(latencyMs, text);
-                }
+                case 200 -> parseChatResponse(response.body(), latencyMs);
                 case 401, 403 -> throw new ModelDiscoveryException(
                         "Authentication failed (HTTP %d).".formatted(response.statusCode()));
                 case 404 -> throw new ModelDiscoveryException(
@@ -141,27 +160,51 @@ public class ModelDiscoveryClient {
         } catch (ModelDiscoveryException e) {
             throw e;
         } catch (java.net.http.HttpTimeoutException e) {
-            throw new ModelDiscoveryException("Model test timed out after 30s");
+            throw new ModelDiscoveryException("Model test timed out after 60s");
         } catch (Exception e) {
             throw new ModelDiscoveryException("Model test failed: " + e.getMessage());
         }
     }
 
     @SuppressWarnings("unchecked")
-    private String extractChatResponse(String body) {
+    private ModelTestResult parseChatResponse(String body, long latencyMs) {
         try {
             Map<String, Object> json = objectMapper.readValue(body, new TypeReference<>() {});
             var choices = (List<Map<String, Object>>) json.get("choices");
-            if (choices != null && !choices.isEmpty()) {
-                var message = (Map<String, Object>) choices.getFirst().get("message");
-                if (message != null) {
-                    return String.valueOf(message.get("content"));
+            if (choices == null || choices.isEmpty()) {
+                return ModelTestResult.ok(latencyMs, "(no choices in response)");
+            }
+            var message = (Map<String, Object>) choices.getFirst().get("message");
+            if (message == null) {
+                return ModelTestResult.ok(latencyMs, "(no message in choice)");
+            }
+
+            Object content = message.get("content");
+            String contentStr = content != null ? content.toString() : "";
+            boolean contentBlank = contentStr.isBlank();
+
+            if (!contentBlank) {
+                return ModelTestResult.ok(latencyMs, contentStr);
+            }
+
+            // Content blank — is there a reasoning field? That's the thinking-model signal.
+            for (String field : REASONING_FIELDS) {
+                Object val = message.get(field);
+                if (val != null && !val.toString().isBlank()) {
+                    String preview = truncate(val.toString(), 120);
+                    return ModelTestResult.thinkingDetected(latencyMs, preview, field);
                 }
             }
-            return "(no response content)";
+
+            return ModelTestResult.ok(latencyMs, "(empty content, no reasoning field)");
         } catch (Exception e) {
-            return "(could not parse response)";
+            return ModelTestResult.ok(latencyMs, "(could not parse response: " + e.getMessage() + ")");
         }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() <= max ? s : s.substring(0, max - 1) + "…";
     }
 
     @SuppressWarnings("unchecked")

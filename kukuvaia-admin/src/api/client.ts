@@ -64,6 +64,7 @@ export interface Model {
   maxTokens: number;
   contextWindow: number | null;
   enabled: boolean;
+  config: Record<string, unknown>;
   discoveredAt: string | null;
   createdAt: string;
 }
@@ -122,6 +123,9 @@ export interface TestModelResult {
   latencyMs?: number;
   response?: string;
   error?: string;
+  emptyContent?: boolean;
+  detectedReasoningField?: string;
+  suggestedConfig?: Record<string, unknown>;
 }
 
 export const providers = {
@@ -139,12 +143,12 @@ export const providers = {
 
 export const models = {
   list: () => api<Model[]>('GET', '/api/models'),
-  create: (data: { providerId: string; modelId: string; displayName: string; tier: string; capabilities?: string[]; maxTokens?: number }) =>
+  create: (data: { providerId: string; modelId: string; displayName: string; tier: string; capabilities?: string[]; maxTokens?: number; config?: Record<string, unknown> }) =>
     apiCall<Model>('POST', '/api/models', { capabilities: ['text', 'code'], maxTokens: 4096, ...data }),
-  update: (id: string, data: { displayName?: string; tier?: string; capabilities?: string[]; maxTokens?: number; contextWindow?: number; enabled?: boolean }) =>
+  update: (id: string, data: { displayName?: string; tier?: string; capabilities?: string[]; maxTokens?: number; contextWindow?: number; enabled?: boolean; config?: Record<string, unknown> }) =>
     apiCall<Model>('PUT', `/api/models/${id}`, data),
   delete: (id: string) => apiCall<void>('DELETE', `/api/models/${id}`),
-  test: (data: { providerId: string; modelId: string }) =>
+  test: (data: { providerId: string; modelId: string; config?: Record<string, unknown> }) =>
     apiCall<TestModelResult>('POST', '/api/models/test', data),
 };
 

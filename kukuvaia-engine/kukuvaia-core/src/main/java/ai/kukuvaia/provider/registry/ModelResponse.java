@@ -2,6 +2,7 @@ package ai.kukuvaia.provider.registry;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -18,6 +19,7 @@ public record ModelResponse(
         int maxTokens,
         Integer contextWindow,
         boolean enabled,
+        Map<String, Object> config,
         Instant discoveredAt,
         Instant createdAt
 ) {
@@ -27,7 +29,7 @@ public record ModelResponse(
                 record.id(), record.providerId(), providerName,
                 record.modelId(), record.displayName(), record.capabilities(),
                 record.tier(), record.maxTokens(), record.contextWindow(),
-                record.enabled(), record.discoveredAt(), record.createdAt()
+                record.enabled(), record.config(), record.discoveredAt(), record.createdAt()
         );
     }
 }

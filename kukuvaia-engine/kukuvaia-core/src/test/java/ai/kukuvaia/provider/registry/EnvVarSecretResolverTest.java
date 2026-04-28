@@ -54,4 +54,18 @@ class EnvVarSecretResolverTest {
         String result = resolver.resolve(" HOME ");
         assertThat(result).isNotBlank();
     }
+
+    @Test
+    @DisplayName("resolve JWT-like literal — returns the reference verbatim")
+    void resolve_literalJwt_returnsAsIs() {
+        String jwt = "eyJhbGciOiJIUzUxMiJ9.eyJ0ZWFtIjoiYWJjIn0.signaturePart";
+        assertThat(resolver.resolve(jwt)).isEqualTo(jwt);
+    }
+
+    @Test
+    @DisplayName("resolve literal with punctuation — returns verbatim (not treated as env var name)")
+    void resolve_literalWithPunctuation_returnsAsIs() {
+        String literal = "sk-ant-1234.abcd/xyz";
+        assertThat(resolver.resolve(literal)).isEqualTo(literal);
+    }
 }

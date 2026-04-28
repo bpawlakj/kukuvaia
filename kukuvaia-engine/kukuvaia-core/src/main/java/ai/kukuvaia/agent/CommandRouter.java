@@ -23,19 +23,11 @@ public class CommandRouter {
     private static final Logger log = LoggerFactory.getLogger(CommandRouter.class);
 
     private static final Set<String> READY_TRIGGERS = Set.of(
-            "ready", "gotowe", "gotowy", "create plan", "stwórz plan", "stworz plan",
-            "zrób plan", "zrob plan", "jestem gotowy", "jestem gotowa"
+            "ready", "create plan"
     );
     private static final Set<String> APPROVAL_TRIGGERS = Set.of(
             // English
-            "yes", "yep", "yeah", "approve", "approved", "confirm", "confirmed", "ok", "okay",
-            // Polish
-            "tak", "zatwierdź", "zatwierdz", "zatwierdzam", "zatwierdzone",
-            "akceptuję", "akceptuje", "akceptuj", "zgoda", "zgadzam się", "zgadzam sie",
-            "potwierdzam", "potwierdź", "potwierdz", "potwierdzone",
-            // Common typos — kept explicit rather than fuzzy-match to keep trigger
-            // behaviour inspectable and testable.
-            "zatwirdz", "zatwirdź", "zatwierz", "zatwier", "akcpetuj", "akceptje"
+            "yes", "yep", "yeah", "approve", "approved", "confirm", "confirmed", "ok", "okay"
     );
 
     /** Triggers that clearly ask to revise the plan — used to distinguish "please change X"
@@ -43,9 +35,7 @@ public class CommandRouter {
      *  phase would silently revert to DRAFTING, which is how "zatwirdz" originally slipped
      *  into a creative-writing response. */
     private static final Set<String> REVISE_TRIGGERS = Set.of(
-            "zmień", "zmien", "zmieniam", "popraw", "poprawki", "inaczej", "zmiana", "zmieńmy", "zmienmy",
-            "revise", "change", "modify", "edit", "rewrite",
-            "dodaj", "usuń", "usun", "wyrzuć", "wyrzuc"
+            "revise", "change", "modify", "edit", "rewrite"
     );
 
     private final CommandRegistry commandRegistry;
@@ -153,7 +143,9 @@ public class CommandRouter {
 
         return switch (trimmedLower) {
             case "" -> Flux.just(new TextBlock(
-                    "Usage: /plan <task description>\nSub-commands: /plan status, /plan cancel, /plan resume <id>, /plan combine <id1,id2,...> <task>, /plan abandon <id>", "error"));
+                    "Usage: /plan <task description>\n" +
+                            "Sub-commands: /plan status, /plan cancel, /plan resume <id>, /plan combine <id1,id2,...> <task>, " +
+                            "/plan abandon <id>, /plan revise, /plan done, /plan exit", "error"));
             case "status" -> {
                 var session = planningModeService.getSession(sessionId);
                 if (session.isEmpty()) {
@@ -171,6 +163,9 @@ public class CommandRouter {
                     yield Flux.just(new TextBlock("Planning cancelled.", null));
                 }
             }
+            case "revise" -> handlePlanRevise(sessionId);
+            case "done" -> handlePlanDone(sessionId);
+            case "exit" -> handlePlanExit(sessionId);
             default -> {
                 // /plan <task> — start planning mode (cancel existing if any)
                 if (planningModeService.isInPlanningMode(sessionId)) {
@@ -182,6 +177,60 @@ public class CommandRouter {
                 yield agentService.streamChat(sessionId, args);
             }
         };
+    }
+
+    /**
+     * {@code /plan revise} — drop from EXECUTING back to DRAFTING so the user
+     * can restructure the plan. Also works from APPROVAL (equivalent to the
+     * existing "zmień" trigger). Status stays 'active' until the revised plan
+     * is re-approved — mid-edit the currently-live plan is not wiped.
+     */
+    private Flux<OutputBlock> handlePlanRevise(String sessionId) {
+        var session = planningModeService.getSession(sessionId);
+        if (session.isEmpty()) {
+            return Flux.just(new TextBlock(
+                    "Not in planning mode. Use /plan resume <id> first, then /plan revise.", null));
+        }
+        var phase = session.get().phase();
+        switch (phase) {
+            case EXECUTING -> planningModeService.revertExecutingToDrafting(sessionId);
+            case APPROVAL -> planningModeService.revertToDrafting(sessionId);
+            default -> {
+                return Flux.just(new TextBlock(
+                        "Cannot revise in phase " + phase + ". /plan revise is available in EXECUTING or APPROVAL.", "error"));
+            }
+        }
+        return agentService.streamChat(sessionId,
+                "The user wants to revise the plan. Ask what specifically should change, then call revisePlan with the updated steps.");
+    }
+
+    /**
+     * {@code /plan done} — close the plan as completed. Sets status='completed'
+     * + phase='done' in DB, exits plan mode. No validation that all steps are
+     * marked (decision B2): user controls when the plan is considered done.
+     */
+    private Flux<OutputBlock> handlePlanDone(String sessionId) {
+        boolean done = planningModeService.markExecutingDone(sessionId);
+        if (!done) {
+            return Flux.just(new TextBlock(
+                    "No active plan to close. /plan done only works when a plan is in EXECUTING phase.", "error"));
+        }
+        return Flux.just(new TextBlock(
+                "Plan marked as completed. Exiting plan mode. Use /plans to browse history.", null));
+    }
+
+    /**
+     * {@code /plan exit} — leave plan mode without changing status or phase in
+     * DB. The plan stays 'active' / 'executing' and can be resumed later via
+     * {@code /plan resume <id>}.
+     */
+    private Flux<OutputBlock> handlePlanExit(String sessionId) {
+        if (!planningModeService.isInPlanningMode(sessionId)) {
+            return Flux.just(new TextBlock("Not in planning mode.", null));
+        }
+        planningModeService.exitPlanMode(sessionId);
+        return Flux.just(new TextBlock(
+                "Exited plan mode. The plan is still active — resume anytime with /plan resume <id>.", null));
     }
 
     private Flux<OutputBlock> handlePlanResume(String planIdStr, String sessionId) {
@@ -290,10 +339,11 @@ public class CommandRouter {
                 // sees). Ask the user to be explicit.
                 log.info("APPROVAL phase unrecognised input — asking user to clarify, sessionId={}", sessionId);
                 yield Flux.just(new TextBlock(
-                        "Nie rozpoznałem odpowiedzi. Wpisz `tak` / `approve` żeby zatwierdzić plan, "
-                                + "albo `zmień` wraz z opisem poprawek żeby przejść do rewizji.",
+                        "Didn't recognise the reply. Type `yes` / `approve` to approve the plan, "
+                                + "or `change` with a description of the edits to go into revision.",
                         null));
             }
+            case EXECUTING -> agentService.streamChat(sessionId, message);
         };
     }
 

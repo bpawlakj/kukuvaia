@@ -18,12 +18,17 @@ import java.util.UUID;
 /**
  * P21 Phase D — natural-language entry points for the plan registry.
  *
- * The agent calls these tools when the user asks things like "jakie mam plany?"
- * or "połącz ten plan z planem X". Results are plain Maps so Spring AI's
- * default JSON serializer handles them without custom schema work. The CLI
- * auto-opens its picker when the agent forwards a {@code PlanListBlock} — this
- * class returns the raw data, the supervisor prompt decides whether to also
- * render {@code PlanListBlock} via the outputSink (covered later).
+ * The agent calls these tools when the user asks about their plans or wants
+ * to combine / resume one. {@code list_plans} returns structured rows so the
+ * LLM can summarise them as plain text in its reply. The interactive picker
+ * is ONLY opened via the {@code /plans} slash command or when the user
+ * explicitly asks to resume a specific plan — natural-language queries get
+ * a text summary, not a picker overlay.
+ *
+ * Hallucination guard: statuses are delivered both verbatim ({@code status},
+ * {@code phase}) and as pre-computed human labels ({@code statusLabel}) so the
+ * model never has to invent a translation. An earlier bug had every plan
+ * shown with the same label regardless of its real status.
  *
  * Session + user context is shared with {@link PlanningTools} — same ThreadLocal.
  */
@@ -43,8 +48,16 @@ public class PlanRegistryTools {
         this.planningModeService = planningModeService;
     }
 
-    @Tool(description = "List the user's existing plans with name, status, phase and parent links. "
-            + "Status filter: 'draft' | 'active' | 'completed' | 'abandoned' | null for all.")
+    @Tool(description = """
+            List the user's plans as structured data. Status filter: \
+            'draft' | 'active' | 'completed' | 'abandoned' | null for all. \
+            Returns a JSON array with per-plan {id, name, task, status, phase, statusLabel, updatedAt}. \
+
+            How to reply: summarise the returned plans as a short text or markdown list. \
+            Use the `statusLabel` field VERBATIM — never translate or relabel it yourself, and \
+            never apply the label of one row to a different row (each row has its own status). \
+            Do NOT open the interactive picker for natural-language queries — the user gets \
+            the picker only via the `/plans` slash command.""")
     public Map<String, Object> list_plans(
             @ToolParam(description = "Optional status filter (draft/active/completed/abandoned). Null returns all.",
                     required = false) String status,
@@ -63,6 +76,7 @@ public class PlanRegistryTools {
             row.put("task", p.taskPreview());
             row.put("status", p.status());
             row.put("phase", p.phase());
+            row.put("statusLabel", statusLabel(p.status(), p.phase()));
             row.put("updatedAt", p.updatedAt() != null ? p.updatedAt().toString() : null);
             if (!p.parents().isEmpty()) {
                 List<Map<String, Object>> parentRows = new ArrayList<>();
@@ -76,8 +90,30 @@ public class PlanRegistryTools {
             }
             rows.add(row);
         }
-        log.info("list_plans: user={} status={} limit={} → {} rows", userId, normalisedStatus, safeLimit, rows.size());
-        return Map.of("plans", rows, "count", rows.size(), "statusFilter", normalisedStatus == null ? "all" : normalisedStatus);
+        log.info("list_plans: user={} status={} limit={} → {} rows (summary mode)",
+                userId, normalisedStatus, safeLimit, rows.size());
+        return Map.of(
+                "plans", rows,
+                "count", rows.size(),
+                "statusFilter", normalisedStatus == null ? "all" : normalisedStatus);
+    }
+
+    /**
+     * English human label for the (status, phase) pair. Delivered to the LLM
+     * so it never has to invent a translation — that was the source of the
+     * "every plan gets the same label regardless of status" bug in earlier
+     * builds. The LLM may translate the label into the user's language in its
+     * reply, but MUST keep the same semantic meaning for the same status.
+     */
+    static String statusLabel(String status, String phase) {
+        if (status == null) return "Unknown";
+        return switch (status) {
+            case "draft" -> "Draft (awaiting approval)";
+            case "active" -> "executing".equals(phase) ? "Active (in progress)" : "Active";
+            case "completed" -> "Completed";
+            case "abandoned" -> "Abandoned";
+            default -> status;
+        };
     }
 
     @Tool(description = "Resume an existing plan by its id. Loads discovery facts and phase from the DB "

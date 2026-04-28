@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -83,11 +84,18 @@ public class ProviderRegistryService {
     public ModelRecord createModel(UUID providerId, String modelId, String displayName,
                                    List<String> capabilities, String tier, int maxTokens,
                                    Integer contextWindow) {
+        return createModel(providerId, modelId, displayName, capabilities, tier, maxTokens,
+                contextWindow, Map.of());
+    }
+
+    public ModelRecord createModel(UUID providerId, String modelId, String displayName,
+                                   List<String> capabilities, String tier, int maxTokens,
+                                   Integer contextWindow, Map<String, Object> config) {
         if (providerRepository.findById(providerId).isEmpty()) {
             throw new IllegalArgumentException("Provider not found: " + providerId);
         }
         return modelRepository.save(providerId, modelId, displayName, capabilities,
-                tier, maxTokens, contextWindow, null);
+                tier, maxTokens, contextWindow, null, config);
     }
 
     public ModelRecord createDiscoveredModel(UUID providerId, String modelId, Instant discoveredAt) {
@@ -267,14 +275,20 @@ public class ProviderRegistryService {
 
     /**
      * Test a specific model by sending a minimal chat completion request.
-     * Returns latency in ms.
+     * When {@code config} contains {@code thinking=true}, the test includes the
+     * {@code reasoning} request parameter so thinking models return both
+     * reasoning and final content.
      */
-    public ModelTestResult testModel(UUID providerId, String modelId) {
+    public ModelTestResult testModel(UUID providerId, String modelId, Map<String, Object> config) {
         ProviderRecord provider = providerRepository.findById(providerId)
                 .orElseThrow(() -> new IllegalArgumentException("Provider not found: " + providerId));
 
         String apiKey = secretResolver.resolve(provider.apiKeyRef());
-        return discoveryClient.testModel(provider.baseUrl(), apiKey, modelId);
+        return discoveryClient.testModel(provider.baseUrl(), apiKey, modelId, config);
+    }
+
+    public ModelTestResult testModel(UUID providerId, String modelId) {
+        return testModel(providerId, modelId, Map.of());
     }
 
     // --- Exceptions ---
