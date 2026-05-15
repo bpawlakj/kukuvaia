@@ -1,0 +1,118 @@
+# TG2.D — Phase 2 acceptance harness for the validation-engine integration.
+#
+# Brings up MongoDB (for sl-validation-engine), Postgres (for kukuvaia-engine),
+# the validation-engine itself, and kukuvaia-engine, all wired so the
+# `validator` and `rule-editor` personas in kukuvaia can drive a real
+# validation run against a stubbed ETSL backend.
+#
+# ETSL is *not* started here — TG2.D points at a WireMock-backed stub for
+# the snapshot endpoint and the assets check, because spinning up the full
+# editorial-suite stack (MongoDB + Elasticsearch + S3 + Postgres + the JVM
+# app itself) is out of scope for a Phase 2 smoke. The validation-engine's
+# etsl-client config below targets the WireMock container.
+#
+# Usage:
+#   docker compose -f docker-compose.phase2.yml up -d --build
+#   ./scripts/phase2-smoke.sh
+#   docker compose -f docker-compose.phase2.yml down -v
+#
+# The build contexts assume both repos are checked out side-by-side at:
+#   ~/Projects/sl-validation-engine/
+#   ~/Projects/kukuvaia/
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: phase2-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: phase2-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kukuvaia
+      POSTGRES_PASSWORD: kukuvaia
+      POSTGRES_DB: kukuvaia
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kukuvaia -d kukuvaia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # WireMock standing in for ETSL's /api/internal/validation-context/* endpoints.
+  # Mappings live under ./scripts/phase2-etsl-stubs/ — drop additional
+  # snapshot fixtures there as the smoke matrix grows.
+  etsl-stub:
+    image: wiremock/wiremock:3.9.1
+    container_name: phase2-etsl-stub
+    restart: unless-stopped
+    command: ["--port", "9090", "--verbose"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../sl-etsl-authorsuite/test/api-tests/src/test/resources/fixtures:/home/wiremock/__files:ro
+      - ./scripts/phase2-etsl-stubs:/home/wiremock/mappings:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9090/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  validation-engine:
+    build:
+      context: ../sl-validation-engine
+      dockerfile: runner/Dockerfile
+    container_name: phase2-validation-engine
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      etsl-stub:
+        condition: service_healthy
+    environment:
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/validation
+      ETSL_BASE_URL: http://etsl-stub:9090
+      ETSL_SERVICE_TOKEN: phase2-test-token
+      KUKUVAIA_BASE_URL: http://kukuvaia-engine:8080
+      VALIDATION_RUN_DISPATCH_BATCH_SIZE: "100"
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/actuator/health | grep -q UP || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kukuvaia-engine:
+    build:
+      context: ./kukuvaia-engine
+      dockerfile: kukuvaia-app/Dockerfile
+    container_name: phase2-kukuvaia-engine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      validation-engine:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      PG_DSN: jdbc:postgresql://postgres:5432/kukuvaia
+      PG_USER: kukuvaia
+      PG_PASSWORD: kukuvaia
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com}
+      LLM_API_KEY: ${LLM_API_KEY:-not-used}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4.5}
+      VALIDATION_ENGINE_TOKEN: phase2-test-token
+      KUKUVAIA_SECURITY_DEV_MODE: "true"
+    ports:
+      - "8080:8080"
+
+volumes: {}

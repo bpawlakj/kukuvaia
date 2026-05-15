@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -56,27 +57,35 @@ func planToolbarActionCount(phase string) int {
 
 // Model is the root Bubbletea model.
 type Model struct {
-	input           textinput.Model
-	viewport        viewport.Model
-	spinner         spinner.Model
-	picker          SessionPicker
-	planPicker      PlanPicker
-	activity        activity.Model
-	client          *api.Client
-	session         string
-	messages        []message
-	waiting         bool
-	waitStart       time.Time
-	showPicker      bool
-	showPlanPicker  bool
+	input            textinput.Model
+	viewport         viewport.Model
+	spinner          spinner.Model
+	picker           SessionPicker
+	planPicker       PlanPicker
+	choicePicker     ChoicePicker
+	activity         activity.Model
+	client           *api.Client
+	session          string
+	persona          string
+	messages         []message
+	waiting          bool
+	waitStart        time.Time
+	showPicker       bool
+	showPlanPicker   bool
+	showChoicePicker bool
 	// When the plan picker closes with a "combine" action, we stash the ids
 	// here and ask the user for a new task description before firing the
 	// server call.
 	pendingCombineIDs []string
-	planning        planToolbar
-	width           int
-	height          int
-	ready           bool
+	planning          planToolbar
+	width             int
+	height            int
+	ready             bool
+	// mouseCaptured tracks whether bubbletea is currently grabbing mouse events. The terminal
+	// can only do native click-drag-to-select while NO program is grabbing the mouse, so
+	// ctrl+t flips this off to let the user copy text and back on to restore wheel-scroll
+	// inside the alt-screen viewport.
+	mouseCaptured bool
 }
 
 // All available slash commands for autocomplete.
@@ -88,7 +97,9 @@ var slashCommands = []string{
 }
 
 // NewModel creates the initial TUI model.
-func NewModel(client *api.Client, sessionID string) Model {
+// persona is forwarded on every chat / command request so KUKUVAIA_PERSONA actually binds the
+// session on the engine side; empty string disables binding (legacy behavior).
+func NewModel(client *api.Client, sessionID, persona string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Type a message... (/ for commands)"
 	ti.CharLimit = 4096
@@ -100,11 +111,13 @@ func NewModel(client *api.Client, sessionID string) Model {
 	s.Style = SpinnerStyle
 
 	return Model{
-		input:    ti,
-		spinner:  s,
-		client:   client,
-		session:  sessionID,
-		activity: activity.New().WithStyles(activity.NewStyles(ColorPrimary, ColorMuted, ColorError)),
+		input:         ti,
+		spinner:       s,
+		client:        client,
+		session:       sessionID,
+		persona:       persona,
+		activity:      activity.New().WithStyles(activity.NewStyles(ColorPrimary, ColorMuted, ColorError)),
+		mouseCaptured: true, // matches the WithMouseCellMotion option passed to tea.NewProgram
 	}
 }
 
@@ -114,6 +127,41 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// Choice picker mode — overlays the chat whenever the agent emitted a ChoiceBlock and is
+	// awaiting the operator's selection. Same priority pattern as the plan picker so the
+	// arrow keys land on the picker instead of the chat input.
+	if m.showChoicePicker {
+		if ws, ok := msg.(tea.WindowSizeMsg); ok {
+			m.width = ws.Width
+			m.height = ws.Height
+		}
+		picker, cmd := m.choicePicker.Update(msg)
+		m.choicePicker = picker
+		cmds = append(cmds, cmd)
+
+		switch mm := msg.(type) {
+		case choicePickerSelectedMsg:
+			m.showChoicePicker = false
+			text := formatChoiceReply(mm)
+			m.messages = append(m.messages, message{role: "user", text: text})
+			if m.ready {
+				m.viewport.SetContent(m.renderMessages())
+				m.viewport.GotoBottom()
+			}
+			m.waiting = true
+			m.waitStart = time.Now()
+			return m, tea.Batch(m.sendChat(text), tickElapsed())
+		case choicePickerCancelMsg:
+			m.showChoicePicker = false
+			return m, nil
+		case tea.KeyMsg:
+			if mm.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+		}
+		return m, tea.Batch(cmds...)
+	}
 
 	// Plan picker mode — takes priority over the main chat flow.
 	if m.showPlanPicker {
@@ -202,6 +250,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpHeight := m.effectiveViewportHeight()
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width, vpHeight)
+			// Strip the printable-letter aliases out of viewport's default KeyMap. Every
+			// KeyMsg fans out to BOTH the textinput and the viewport (see the bottom of
+			// Update); the default KeyMap binds space/f → PageDown, b → PageUp, u/d →
+			// HalfPageUp/Down, j/k → Up/Down, so typing those letters into the input
+			// also scrolled the chat — visible as the screen "jumping" while typing.
+			// Mouse wheel scrolling is unaffected; pgup/pgdown still works because the
+			// keys are kept here.
+			m.viewport.KeyMap = viewport.KeyMap{
+				PageDown: key.NewBinding(key.WithKeys("pgdown")),
+				PageUp:   key.NewBinding(key.WithKeys("pgup")),
+			}
 			m.viewport.SetContent(m.renderMessages())
 			m.ready = true
 		} else {
@@ -252,6 +311,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = nil
 			m.viewport.SetContent("")
 			return m, nil
+		case "ctrl+t":
+			// Toggle mouse capture. ON = bubbletea owns the mouse (wheel-scroll inside the
+			// alt-screen viewport works, but the terminal can't do click-drag selection on
+			// its own). OFF = native terminal behavior — text selection works normally for
+			// copy/paste, at the cost of losing in-app wheel scroll until you toggle back.
+			// Modifier-drag (Shift on Linux, Option on macOS) is the standard escape hatch
+			// across vim/k9s/lazygit but doesn't work in every terminal emulator — this
+			// keybinding gives a deterministic alternative.
+			if m.mouseCaptured {
+				m.mouseCaptured = false
+				return m, tea.DisableMouse
+			}
+			m.mouseCaptured = true
+			return m, tea.EnableMouseCellMotion
 		case "ctrl+o":
 			// Toggle activity tracker expanded view — only meaningful while active.
 			if !m.activity.IsIdle() {
@@ -272,10 +345,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.planning = planToolbar{}
 				m.messages = append(m.messages, message{
 					role: "assistant",
-					blocks: []api.OutputBlock{api.TextBlock{Content:
-						"Planning suspended locally. The draft is still in the server — " +
-							"use `/plans` or `ctrl+p` to browse and `/plan resume <id>` to return, " +
-							"or `/plan cancel` to abandon."}},
+					blocks: []api.OutputBlock{api.TextBlock{Content: "Planning suspended locally. The draft is still in the server — " +
+						"use `/plans` or `ctrl+p` to browse and `/plan resume <id>` to return, " +
+						"or `/plan cancel` to abandon."}},
 				})
 				m.viewport.SetContent(m.renderMessages())
 				m.viewport.GotoBottom()
@@ -404,6 +476,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.planPicker.filter = pb.StatusFilter
 				m.showPlanPicker = true
 			}
+			// Agent-triggered ChoiceBlock auto-opens the choice picker overlay. The block
+			// stays in chat history for context — the picker is just a parallel UI on top.
+			if cb := findChoiceBlock(msg.blocks); cb != nil {
+				m.choicePicker = NewChoicePicker(*cb)
+				m.showChoicePicker = true
+			}
 			// Strip the phase-only MetadataBlock out of chat history — it is a
 			// control signal consumed below by syncPlanningFromServer, not user-
 			// facing content. Other metadata blocks still render normally.
@@ -477,6 +555,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showPlanPicker = true
 				return m, nil
 			}
+			// Same for ChoiceBlock — direct hand-off to the choice picker overlay.
+			if cb := findChoiceBlock(msg.blocks); cb != nil {
+				m.choicePicker = NewChoicePicker(*cb)
+				m.showChoicePicker = true
+				return m, nil
+			}
 			// Sync planning phase if the server told us via a TextBlock like
 			// "Resumed plan '...' in phase DRAFTING." Keeps the yellow border
 			// + badge accurate after /plan resume.
@@ -526,6 +610,30 @@ func findPlanListBlock(blocks []api.OutputBlock) *api.PlanListBlock {
 		}
 	}
 	return nil
+}
+
+// findChoiceBlock returns the first ChoiceBlock in the slice or nil if absent.
+// One ChoiceBlock per turn is the contract — the agent that emits two would force the
+// operator into nested pickers we don't currently render.
+func findChoiceBlock(blocks []api.OutputBlock) *api.ChoiceBlock {
+	for _, b := range blocks {
+		if cb, ok := b.(api.ChoiceBlock); ok {
+			return &cb
+		}
+	}
+	return nil
+}
+
+// formatChoiceReply turns the operator's picker selection into the follow-up user chat
+// message format the rule-editor persona's system prompt promises. One canonical shape
+// keeps the LLM's parsing of the next turn deterministic — it scans for `[user-choice ...]`
+// and pulls the id out via `(id=...)`.
+func formatChoiceReply(sel choicePickerSelectedMsg) string {
+	label := sel.option.Label
+	if label == "" {
+		label = sel.option.Value
+	}
+	return fmt.Sprintf("[user-choice %s] %s (id=%s)", sel.choiceID, label, sel.option.Value)
 }
 
 // planningPhaseKey mirrors AgentService.PLANNING_PHASE_KEY on the server.
@@ -716,6 +824,9 @@ func (m *Model) updateSuggestions() {
 }
 
 func (m Model) View() string {
+	if m.showChoicePicker {
+		return m.choicePicker.View(m.width, m.height)
+	}
 	if m.showPlanPicker {
 		return m.planPicker.View(m.width, m.height)
 	}
@@ -728,7 +839,16 @@ func (m Model) View() string {
 
 	bottom := m.buildBottom()
 	vp := m.viewport
-	vp.Height = viewportHeightFor(m.height, bottom)
+	desiredHeight := viewportHeightFor(m.height, bottom)
+	// Only resize the local copy when the desired height actually differs from the model's
+	// stored height. Re-assigning the same value still works, but avoids any internal
+	// recomputation in Bubbles' viewport that could nudge YOffset on a render-only pass —
+	// and cheap to gate on equality. The Update handlers are the authoritative writers of
+	// the persistent m.viewport.Height; View() just keeps its local copy in sync without
+	// retroactively scrolling the on-screen content.
+	if vp.Height != desiredHeight {
+		vp.Height = desiredHeight
+	}
 	// Do NOT auto-scroll here — user's pgup/arrow navigation must survive
 	// re-renders. Scroll-to-bottom happens explicitly in Update() on new
 	// messages (see enter handler and chatResultMsg).
@@ -778,7 +898,15 @@ func (m Model) buildBottom() string {
 	if m.isPlanning() {
 		inputBoxStyle = InputBoxPlanningStyle
 	}
-	inputBox := inputBoxStyle.Width(inputBoxWidth).Render(m.input.View())
+	// Height(1) locks the inner content to one line so the rendered box stays a stable 3 rows
+	// (top border + content + bottom border). Without it, lipgloss can wrap a long
+	// "user text + ghost-text suggestion" string vertically inside the box, growing `bottom`
+	// by extra newlines on every keystroke. viewportHeightFor counts those newlines, so the
+	// chat viewport's height kept oscillating during typing — visible as content jumping
+	// up and down. m.input.Width = msg.Width-6 already makes the textinput horizontal-scroll,
+	// but ShowSuggestions ghost-text occasionally pushes the rendered string past the box's
+	// inner width; pinning Height seals that gap.
+	inputBox := inputBoxStyle.Width(inputBoxWidth).Height(1).Render(m.input.View())
 
 	planningBadge := ""
 	if m.isPlanning() {
@@ -878,7 +1006,7 @@ type chatStreamMsg struct {
 // Each read produces a chatStreamMsg with a `next` cmd that reads the following
 // block, until the channels close and a chatResultMsg is emitted.
 func (m Model) sendChat(text string) tea.Cmd {
-	blocks, errs := m.client.Chat(m.session, text)
+	blocks, errs := m.client.Chat(m.session, text, m.persona)
 	return readNextChatBlock(blocks, errs, nil)
 }
 
@@ -963,16 +1091,23 @@ func indentLines(s, prefix string) string {
 }
 
 // renderUserMessage styles user input like Claude Code — prefix + styled text.
+//
+// Long user messages wrap across multiple lines via UserMsgBoxStyle.Width. Plain
+// string concatenation (prefix + msgText) only puts the "❯ " on the first line;
+// the continuation lines fall back to column 0, which looks broken — long messages
+// that the user just submitted appear to "leak" against the left margin instead of
+// staying inside the message gutter. lipgloss.JoinHorizontal aligns the multi-line
+// right-hand side under the (single-line) prefix's top edge AND pads continuation
+// rows with spaces matching the prefix width, so the whole bubble renders as one
+// indented block.
 func renderUserMessage(text string, width int) string {
 	prefix := UserMsgPrefixStyle.Render("❯ ")
 	if strings.HasPrefix(text, "/") {
-		// Slash command — purple badge
 		cmdText := CommandBadgeStyle.Render(text)
-		return prefix + cmdText
+		return lipgloss.JoinHorizontal(lipgloss.Top, prefix, cmdText)
 	}
-	// Regular message — green bold
 	msgText := UserMsgBoxStyle.Width(width - 4).Render(text)
-	return prefix + msgText
+	return lipgloss.JoinHorizontal(lipgloss.Top, prefix, msgText)
 }
 
 // handlePlanToolbarAction executes the selected toolbar action.
@@ -1143,14 +1278,16 @@ func formatElapsed(d time.Duration) string {
 }
 
 // Run starts the Bubbletea program with debug logging to ~/.kukuvaia/cli.log.
-func Run(client *api.Client, sessionID string) error {
+// persona is the active persona name (KUKUVAIA_PERSONA / --persona / yaml); pushed on every
+// chat + command request.
+func Run(client *api.Client, sessionID, persona string) error {
 	// Set up file logging (bubbletea uses alt screen, so stdout is unavailable)
 	if f, err := tea.LogToFile("cli-debug.log", "kukuvaia"); err == nil {
 		defer f.Close()
-		log.Printf("[INIT] session=%s, server=%s", sessionID, client.BaseURL)
+		log.Printf("[INIT] session=%s, persona=%q, server=%s", sessionID, persona, client.BaseURL)
 	}
 
-	m := NewModel(client, sessionID)
+	m := NewModel(client, sessionID, persona)
 	// WithMouseCellMotion forwards mouse events (including wheel) to the model.
 	// Bubbles' viewport handles MouseWheel up/down natively — restores native
 	// iTerm2-style scroll inside the alt-screen TUI. Text selection with drag

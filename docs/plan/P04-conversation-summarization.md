@@ -1,4 +1,18 @@
-# P04: Conversation Summarization -- Context Compression via Summaries
+# P04: Conversation Summarization — Context Compression via Summaries
+
+> **Status: Superseded by [P24 Context Compaction](P24-context-compaction.md) (2026-05-13).**
+>
+> P04 was scoped to "summarise older messages when the message-count window slides."
+> Real-world testing (2026-05-13 rule-authoring session) revealed a different failure
+> mode: a single agent turn can blow past the LLM's 200 K-token context window in
+> 8 internal tool-call rounds, long before the 100-message default window fills.
+> Message-count and cron triggers cannot catch this — only a token-threshold trigger can.
+>
+> P24 absorbs P04's goals (long-session summarisation persisted to
+> `conversations.summary`) under a unified token-threshold-triggered advisor that ALSO
+> handles in-turn rapid growth (tool-response compaction, retry-loop collapse). See
+> P24 Phase D for the part originally specified in this plan. The text below is kept
+> for reference but should not be implemented as written.
 
 ## Problem
 

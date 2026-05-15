@@ -1,8 +1,8 @@
 package ai.kukuvaia.agent.subagent;
 
-import ai.kukuvaia.agent.daemon.ExecutionContext;
+import ai.kukuvaia.provider.model.ExecutionContext;
 import ai.kukuvaia.config.ToolRegistryConfig;
-import ai.kukuvaia.provider.LlmProviderService;
+import ai.kukuvaia.provider.service.LlmProviderService;
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;

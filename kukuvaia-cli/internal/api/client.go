@@ -127,8 +127,9 @@ func (c *Client) ListPlans(filter string) ([]PlanEntry, error) {
 
 // ExecuteCommand sends a slash command to the server and returns the response blocks.
 // Commands return a JSON array (not SSE).
-func (c *Client) ExecuteCommand(cmd, args, sessionID string) ([]OutputBlock, error) {
-	body, _ := json.Marshal(CommandRequest{Args: args, SessionID: sessionID})
+// persona is forwarded so the engine binds the session before dispatching the command.
+func (c *Client) ExecuteCommand(cmd, args, sessionID, persona string) ([]OutputBlock, error) {
+	body, _ := json.Marshal(CommandRequest{Args: args, SessionID: sessionID, Persona: persona})
 	resp, err := c.HTTPClient.Post(
 		c.BaseURL+"/api/commands/"+cmd,
 		"application/json",

@@ -249,6 +249,74 @@ npm run build                           # tsc + vite build
 
 ---
 
+## Validation-engine MCP integration
+
+The `validation-engine` (separate repo at `~/Projects/sl-validation-engine`) exposes a 19-tool MCP surface that the `validator` and `rule-editor` personas in this engine consume. The two are linked through the regular MCP-client connection registry — Spring AI's `McpSyncClient` discovers the tools at startup once a connection row is present in `kukuvaia.mcp_connections`.
+
+### Register the connection
+
+The engine reads connections from PostgreSQL (`kukuvaia.mcp_connections`, see migration `V17`). Add a row either via the admin dashboard or directly:
+
+```sql
+-- Replace VALIDATION_ENGINE_TOKEN with the env var name your deploy uses
+INSERT INTO kukuvaia.mcp_connections (name, url, sse_endpoint, headers, enabled, description)
+VALUES (
+  'validation-engine',
+  'http://localhost:8081/mcp',                      -- engine MCP root
+  '/sse',                                           -- Spring AI MCP server default
+  '{"Authorization": "env:VALIDATION_ENGINE_TOKEN"}'::jsonb,
+  true,
+  'sl-validation-engine MCP — drives the validator + rule-editor personas'
+);
+```
+
+After the row is in place, restart `kukuvaia-app` (or call the admin refresh endpoint). On startup the `McpToolDiscoveryLogger` prints the discovered tool count — should be 19 (5 context + 9 rule + 5 result tools, see [validation-engine architecture §7](https://github.com/sl-technology/sl-validation-engine/blob/master/docs/architecture/validation-engine.md#7-mcp-tool-surface)).
+
+### Health-check semantics
+
+The cache (`McpConnectionsCache`) handles startup failures gracefully — if `validation-engine` is unreachable when kukuvaia boots, the engine still starts; the cache simply contains no entry for that connection until the next refresh. The other personas keep working; only the validation-engine personas are degraded.
+
+### Phase 2 acceptance smoke (TG2.D)
+
+Bring up the 3-service harness and run the smoke gates:
+
+```bash
+docker compose -f docker-compose.phase2.yml up -d --build
+./scripts/phase2-smoke.sh
+```
+
+The compose file boots:
+
+- **mongodb** — backing store for `validation-engine`
+- **postgres** — backing store for `kukuvaia-engine`
+- **etsl-stub** — WireMock standing in for `sl-etsl-authorsuite`'s `/api/internal/validation-context/*` (full ETSL stack is out of scope for the Phase 2 smoke)
+- **validation-engine** — built from `~/Projects/sl-validation-engine`
+- **kukuvaia-engine** — built from this repo
+
+`scripts/phase2-smoke.sh` exercises the four gates from plan TG2.D.1: `POST /api/v2/validate` returns `runId`, the polled run reaches `COMPLETED`, at least one finding has `evaluatedBy=LLM`, and `outlineHash` is recorded. Set `LLM_API_KEY` in your shell before `up` if you want a real LLM round-trip; the smoke tolerates the bundled `not-used` placeholder when you only care about transport-level wiring.
+
+Tear down:
+
+```bash
+docker compose -f docker-compose.phase2.yml down -v
+```
+
+### Persona activation (CLI)
+
+```bash
+# Run a validation against an outline (read + record only):
+KUKUVAIA_PERSONA=validator ./kukuvaia
+> validate outline outline-12345
+
+# Author a new rule (full mutation rights — trusted operator only):
+KUKUVAIA_PERSONA=rule-editor ./kukuvaia
+> add a rule that ensures every Lesson has a non-empty TEXT_V2 content item
+```
+
+The `validator` persona's whitelist is the read+record subset of the validation-engine MCP surface; it cannot mutate the rule catalog even if a content item contains injected instructions to do so.
+
+---
+
 ## Documentation
 
 - [`docs/architecture/`](docs/architecture/) — system design, memory architecture, Embabel integration

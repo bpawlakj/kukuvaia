@@ -1,20 +1,21 @@
 package ai.kukuvaia.config;
 
 import ai.kukuvaia.advisors.ComplexityDetector;
+import ai.kukuvaia.advisors.ContextCompactionAdvisor;
 import ai.kukuvaia.advisors.LoopDetectionAdvisor;
 import ai.kukuvaia.advisors.ModelRoutingAdvisor;
 import ai.kukuvaia.advisors.SessionContextAdvisor;
 import ai.kukuvaia.agent.PlanningModeService;
 import ai.kukuvaia.agent.SessionEscalationService;
-import ai.kukuvaia.provider.registry.ComplexityMappingService;
+import ai.kukuvaia.provider.service.ComplexityMappingService;
 import ai.kukuvaia.harness.HarnessAdvisor;
 import ai.kukuvaia.harness.HarnessService;
 import ai.kukuvaia.memory.advisor.SmartMemoryAdvisor;
 import ai.kukuvaia.memory.embedding.EmbeddingService;
 import ai.kukuvaia.memory.repository.SmartMemoryRepository;
-import ai.kukuvaia.provider.ProviderAuditLog;
-import ai.kukuvaia.provider.registry.ChatModelCache;
-import ai.kukuvaia.provider.registry.ModelRepository;
+import ai.kukuvaia.provider.service.ProviderAuditLog;
+import ai.kukuvaia.provider.service.ChatModelCache;
+import ai.kukuvaia.provider.repository.ModelRepository;
 import ai.kukuvaia.security.DataMaskingAdvisor;
 import ai.kukuvaia.security.MaskingService;
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
@@ -55,16 +56,16 @@ class ChatClientConfigTest {
                 new SessionEscalationService(),
                 registry);
         var loopAdvisor = new LoopDetectionAdvisor();
-        var maskingAdvisor = new DataMaskingAdvisor(
-                new MaskingService(true, true, true, true, true, true), true);
         var harnessAdvisor = new HarnessAdvisor(mock(HarnessService.class), true);
 
         var planningModeService = mock(PlanningModeService.class);
         var sessionContextAdvisor = mock(SessionContextAdvisor.class);
+        var contextCompactionAdvisor = mock(ContextCompactionAdvisor.class);
         var toolCallingManager = mock(ToolCallingManager.class);
         ChatClient client = config.chatClient(builder, memory, auditLog, sanitizer,
-                memoryAdvisor, routingAdvisor, loopAdvisor, maskingAdvisor, harnessAdvisor,
-                planningModeService, sessionContextAdvisor, toolCallingManager, List.of());
+                memoryAdvisor, routingAdvisor, loopAdvisor, harnessAdvisor,
+                planningModeService, sessionContextAdvisor, contextCompactionAdvisor,
+                toolCallingManager, List.of());
 
         assertThat(client).isNotNull();
     }

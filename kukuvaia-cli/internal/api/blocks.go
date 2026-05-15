@@ -113,6 +113,29 @@ type SpanEventBlock struct {
 
 func (SpanEventBlock) blockType() string { return "span_event" }
 
+// ChoiceOption — one entry in a ChoiceBlock picker.
+// Value is the canonical machine-readable id the agent will get back.
+// Label and Description drive the human-readable rendering.
+type ChoiceOption struct {
+	Value       string `json:"value"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// ChoiceBlock — interactive single-select prompt. The CLI auto-opens an arrow-navigable picker
+// on receipt; on confirm it sends back a follow-up user message of the form
+// "[user-choice <choiceId>] <label> (id=<value>)" so the LLM next turn can pick up the operator's
+// selection from the chat history. Every interactive persona that needs the operator to
+// disambiguate (multi-result template lookups, ambiguous intent) calls the server-side
+// ask_user_to_choose tool which emits this block.
+type ChoiceBlock struct {
+	ChoiceID string         `json:"choiceId"`
+	Prompt   string         `json:"prompt"`
+	Options  []ChoiceOption `json:"options"`
+}
+
+func (ChoiceBlock) blockType() string { return "choice" }
+
 // ParseOutputBlock infers the OutputBlock type from JSON field presence.
 // Field detection order matters — more specific fields checked first,
 // TextBlock is the fallback since "content" appears in both Text and Code.
@@ -143,6 +166,11 @@ func ParseOutputBlock(data []byte) (OutputBlock, error) {
 		return b, json.Unmarshal(data, &b)
 	case has(raw, "valid"):
 		var b VerificationBlock
+		return b, json.Unmarshal(data, &b)
+	// ChoiceBlock has both "choiceId" and "options" — checking either uniquely identifies it.
+	// Using "choiceId" because "options" might appear in some future generic block variant.
+	case has(raw, "choiceId"):
+		var b ChoiceBlock
 		return b, json.Unmarshal(data, &b)
 	case has(raw, "metadata"):
 		var b MetadataBlock

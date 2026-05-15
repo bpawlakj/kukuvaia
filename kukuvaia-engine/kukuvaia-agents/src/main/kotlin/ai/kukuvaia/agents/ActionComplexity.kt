@@ -1,6 +1,6 @@
 package ai.kukuvaia.agents
 
-import ai.kukuvaia.provider.registry.TaskComplexity
+import ai.kukuvaia.provider.model.TaskComplexity
 
 /**
  * Declares the complexity level of an Embabel {@code @Action} method.

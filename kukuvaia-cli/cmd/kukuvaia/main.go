@@ -28,7 +28,7 @@ func main() {
 		}
 	}
 
-	if err := tui.Run(client, cfg.SessionID); err != nil {
+	if err := tui.Run(client, cfg.SessionID, cfg.Persona); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

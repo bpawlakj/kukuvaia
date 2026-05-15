@@ -1,7 +1,11 @@
 package ai.kukuvaia.api;
 
-import ai.kukuvaia.provider.registry.*;
-
+import ai.kukuvaia.provider.model.*;
+import ai.kukuvaia.provider.repository.*;
+import ai.kukuvaia.provider.service.*;
+import ai.kukuvaia.provider.secret.*;
+import ai.kukuvaia.provider.dto.*;
+import ai.kukuvaia.provider.transport.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -9,6 +13,15 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import ai.kukuvaia.provider.dto.CreateProviderRequest;
+import ai.kukuvaia.provider.service.ModelDiscoveryClient;
+import ai.kukuvaia.provider.dto.ModelResponse;
+import ai.kukuvaia.provider.model.ProviderRecord;
+import ai.kukuvaia.provider.service.ProviderRegistryService;
+import ai.kukuvaia.provider.dto.ProviderResponse;
+import ai.kukuvaia.provider.secret.SecretResolver;
+import ai.kukuvaia.provider.dto.SyncModelsResponse;
+import ai.kukuvaia.provider.dto.UpdateProviderRequest;
 
 /**
  * Provider management endpoints.
@@ -86,20 +99,27 @@ public class ProviderController {
     }
 
     @PostMapping("/test-connection")
-    public ResponseEntity<?> testProviderRaw(@RequestBody Map<String, String> body) {
-        String baseUrl = body.get("baseUrl");
-        String apiKeyRef = body.get("apiKeyRef");
-        if (baseUrl == null || baseUrl.isBlank() || apiKeyRef == null || apiKeyRef.isBlank()) {
+    public ResponseEntity<?> testProviderRaw(@RequestBody Map<String, Object> body) {
+        Object baseUrlObj = body.get("baseUrl");
+        Object apiKeyRefObj = body.get("apiKeyRef");
+        if (!(baseUrlObj instanceof String baseUrl) || baseUrl.isBlank()
+                || !(apiKeyRefObj instanceof String apiKeyRef) || apiKeyRef.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "baseUrl and apiKeyRef are required"));
         }
+        Map<String, Object> providerConfig = extractConfig(body.get("config"));
         try {
-            long latencyMs = registryService.testProviderRaw(baseUrl, apiKeyRef);
+            long latencyMs = registryService.testProviderRaw(baseUrl, apiKeyRef, providerConfig);
             return ResponseEntity.ok(Map.of("status", "connected", "latencyMs", latencyMs));
         } catch (ModelDiscoveryClient.ModelDiscoveryException e) {
             return ResponseEntity.ok(Map.of("status", "failed", "error", e.getMessage()));
         } catch (SecretResolver.SecretNotFoundException e) {
             return ResponseEntity.ok(Map.of("status", "failed", "error", "API key not configured: " + e.getMessage()));
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> extractConfig(Object raw) {
+        return raw instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
     @PostMapping("/{id}/test")

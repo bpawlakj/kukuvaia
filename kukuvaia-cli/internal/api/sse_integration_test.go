@@ -9,7 +9,7 @@ import (
 
 func TestChat_Integration(t *testing.T) {
 	client := NewClient(testServerURL)
-	blocks, errs := client.Chat("test-cli-sse", "Say hello in one word")
+	blocks, errs := client.Chat("test-cli-sse", "Say hello in one word", "")
 
 	var received []OutputBlock
 	timeout := time.After(90 * time.Second)

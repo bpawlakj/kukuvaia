@@ -106,4 +106,78 @@ class McpConnectionsCacheTest {
         assertThat(connections.get("alpha").url()).isEqualTo("https://alpha.example/mcp");
         assertThat(connections.get("alpha").sseEndpoint()).isEqualTo("/sse");
     }
+
+    /**
+     * TG2.C — validation-engine MCP connection contract. The persona implementations in
+     * TG2.A / TG2.B address an MCP connection registered under the name "validation-engine".
+     * These tests pin the contract: when an operator inserts the row from
+     * scripts/register-validation-engine-mcp.sql, the cache exposes the connection under
+     * that name, the URL prefix lookup routes to it, and the Authorization header carries
+     * the env-var reference (so the token never sits in a DB row).
+     */
+    @org.junit.jupiter.api.Nested
+    @DisplayName("TG2.C — validation-engine MCP connection contract")
+    class ValidationEngineConnection {
+
+        private static final String CONNECTION_NAME = "validation-engine";
+        private static final String DEFAULT_URL = "http://localhost:8081/mcp";
+
+        @Test
+        @DisplayName("validation-engine row is exposed under name 'validation-engine' with env-ref Authorization header")
+        void validationEngineRow_isResolvedByName() {
+            McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
+            when(repo.findAllEnabled()).thenReturn(List.of(
+                    conn(CONNECTION_NAME, DEFAULT_URL,
+                            Map.of("Authorization", "env:VALIDATION_ENGINE_TOKEN"))
+            ));
+
+            McpConnectionsCache cache = new McpConnectionsCache(repo);
+
+            assertThat(cache.all())
+                    .as("the validation-engine row must round-trip through the cache exactly once")
+                    .extracting(McpConnection::name)
+                    .containsExactly(CONNECTION_NAME);
+            assertThat(cache.headersFor(CONNECTION_NAME))
+                    .as("token must be an env reference, never a literal — see scripts/register-validation-engine-mcp.sql")
+                    .containsEntry("Authorization", "env:VALIDATION_ENGINE_TOKEN");
+        }
+
+        @Test
+        @DisplayName("outbound URLs at the validation-engine MCP root resolve to the validation-engine connection")
+        void validationEngineUrl_routesToConnection() {
+            McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
+            when(repo.findAllEnabled()).thenReturn(List.of(
+                    conn(CONNECTION_NAME, DEFAULT_URL, Map.of())
+            ));
+
+            McpConnectionsCache cache = new McpConnectionsCache(repo);
+
+            // Spring AI appends /sse, message paths, etc. — longest-prefix match must still
+            // resolve them all back to "validation-engine" so the header customizer attaches
+            // the token on every outbound MCP request.
+            assertThat(cache.connectionNameForUri(DEFAULT_URL + "/sse")).contains(CONNECTION_NAME);
+            assertThat(cache.connectionNameForUri(DEFAULT_URL + "/message/abc")).contains(CONNECTION_NAME);
+            assertThat(cache.connectionNameForUri("http://elsewhere/sse"))
+                    .as("requests outside the validation-engine prefix must NOT pick up its token")
+                    .isEmpty();
+        }
+
+        @Test
+        @DisplayName("validation-engine row with enabled=false is omitted — graceful degradation when ops disables it")
+        void validationEngineDisabled_doesNotAppear() {
+            // findAllEnabled() filters disabled rows at the repository level (see
+            // McpConnectionsRepository SQL), so the cache never sees them. Simulate that
+            // by returning an empty list — the engine still boots, the validator persona
+            // simply has no MCP backend available until the connection is re-enabled.
+            McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
+            when(repo.findAllEnabled()).thenReturn(List.of());
+
+            McpConnectionsCache cache = new McpConnectionsCache(repo);
+
+            assertThat(cache.all()).isEmpty();
+            assertThat(cache.connectionNameForUri(DEFAULT_URL + "/sse")).isEmpty();
+            // Engine still boots: cache construction did not throw, headersFor returns empty map.
+            assertThat(cache.headersFor(CONNECTION_NAME)).isEmpty();
+        }
+    }
 }

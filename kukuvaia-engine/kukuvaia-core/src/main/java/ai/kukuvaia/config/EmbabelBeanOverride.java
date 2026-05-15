@@ -28,8 +28,13 @@ public class EmbabelBeanOverride implements BeanDefinitionRegistryPostProcessor 
         // kukuvaia provides its own via EmbabelModelBridgeConfig (DB-backed, lazy).
         removeBeanIfPresent(registry, "modelProvider");
 
-        // Embabel's MCP client conflicts with Spring AI's (duplicate mcpSyncClients bean).
-        // kukuvaia uses Spring AI's MCP client directly.
+        // Embabel's QuiteMcpClientAutoConfiguration extends Spring AI's McpClientAutoConfiguration
+        // and adds a sibling `mcpSyncClients` @Bean with a divergent 4th param signature
+        // (ObjectProvider<ClientMcpSyncHandlersRegistry> vs the parent's bare type). Spring then
+        // sees two factory methods of the same bean name on the SAME class and aborts with
+        // "Ambiguous factory method matches". Removing the broken definition lets our own
+        // mcpSyncClients @Bean in McpClientConfig take over — same wiring contract, single
+        // factory method, no ambiguity.
         removeBeanIfPresent(registry, "mcpSyncClients");
     }
 

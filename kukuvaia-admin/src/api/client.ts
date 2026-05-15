@@ -50,6 +50,7 @@ export interface Provider {
   enabled: boolean;
   priority: number;
   modelCount: number;
+  config: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -130,14 +131,14 @@ export interface TestModelResult {
 
 export const providers = {
   list: () => api<Provider[]>('GET', '/api/providers'),
-  create: (data: { name: string; type: string; baseUrl: string; apiKeyRef: string; priority?: number }) =>
+  create: (data: { name: string; type: string; baseUrl: string; apiKeyRef: string; priority?: number; config?: Record<string, unknown> }) =>
     apiCall<Provider>('POST', '/api/providers', data),
-  update: (id: string, data: { name?: string; type?: string; baseUrl?: string; apiKeyRef?: string; enabled?: boolean; priority?: number }) =>
+  update: (id: string, data: { name?: string; type?: string; baseUrl?: string; apiKeyRef?: string; enabled?: boolean; priority?: number; config?: Record<string, unknown> }) =>
     apiCall<Provider>('PUT', `/api/providers/${id}`, data),
   delete: (id: string) => apiCall<void>('DELETE', `/api/providers/${id}`),
   syncModels: (id: string) => api<unknown>('POST', `/api/providers/${id}/sync-models`),
   testConnection: (id: string) => api<TestConnectionResult>('POST', `/api/providers/${id}/test`),
-  testConnectionRaw: (data: { baseUrl: string; apiKeyRef: string }) =>
+  testConnectionRaw: (data: { baseUrl: string; apiKeyRef: string; config?: Record<string, unknown> }) =>
     apiCall<TestConnectionResult>('POST', '/api/providers/test-connection', data),
 };
 

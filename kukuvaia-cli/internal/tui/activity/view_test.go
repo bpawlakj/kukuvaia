@@ -79,6 +79,45 @@ func TestView_Expanded_ShowsTreeBoxDrawing(t *testing.T) {
 	}
 }
 
+// Animator elapsed used to drop to "(0s)" the moment every span ended because the
+// IsInFlight() filter excluded completed nodes, leaving earliestStart=nil. The user
+// saw "Thinking (0s)" residually on EVERY turn regardless of how long the work took.
+// The fix: when no nodes are in-flight, render the post-mortem total (latestEnd -
+// earliestStart) instead of zero.
+func TestAnimator_ResidualFrame_ShowsPostMortemElapsed(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	end := start.Add(7 * time.Second)
+	m := New()
+	m = m.Update(SpanStartMsg{SpanID: "r", Name: "role:supervisor", Timestamp: start})
+	m = m.Update(SpanEndMsg{SpanID: "r", Status: "success", Timestamp: end})
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "(0s)") {
+		t.Errorf("animator must NOT show (0s) once the tree has ended — should display the post-mortem total. got: %q", out)
+	}
+	if !strings.Contains(out, "(7s") {
+		t.Errorf("animator should show post-mortem total of 7s, got %q", out)
+	}
+}
+
+// Sub-second turns previously rendered as "(0s)" because Truncate(time.Second)
+// rounded down. The fix truncates to 100ms so short turns still show actual cost.
+func TestAnimator_SubSecondTurn_ShowsHundredsOfMillis(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	end := start.Add(450 * time.Millisecond)
+	m := New()
+	m = m.Update(SpanStartMsg{SpanID: "r", Name: "role:supervisor", Timestamp: start})
+	m = m.Update(SpanEndMsg{SpanID: "r", Status: "success", Timestamp: end})
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "(0s)") {
+		t.Errorf("sub-second turns must NOT round to 0s — got %q", out)
+	}
+	if !strings.Contains(out, "400ms") {
+		t.Errorf("450ms should truncate to 400ms in the animator, got %q", out)
+	}
+}
+
 func TestView_ErrorNode_UsesErrorSymbol(t *testing.T) {
 	now := time.Unix(0, 0)
 	m := New()

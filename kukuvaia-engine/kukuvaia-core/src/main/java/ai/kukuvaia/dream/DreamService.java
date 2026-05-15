@@ -1,11 +1,20 @@
 package ai.kukuvaia.dream;
 
-import ai.kukuvaia.provider.registry.*;
+import ai.kukuvaia.provider.model.*;
+import ai.kukuvaia.provider.repository.*;
+import ai.kukuvaia.provider.service.*;
+import ai.kukuvaia.provider.secret.*;
+import ai.kukuvaia.provider.dto.*;
+import ai.kukuvaia.provider.transport.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import ai.kukuvaia.provider.repository.ModelRepository;
+import ai.kukuvaia.provider.repository.ModelRoleRepository;
+import ai.kukuvaia.provider.repository.ProviderRepository;
+import ai.kukuvaia.provider.secret.SecretResolver;
 
 /**
  * Orchestrates dream runs: deterministic health checks, config audits,

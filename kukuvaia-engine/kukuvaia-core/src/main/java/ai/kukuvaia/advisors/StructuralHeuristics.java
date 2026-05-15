@@ -1,6 +1,6 @@
 package ai.kukuvaia.advisors;
 
-import ai.kukuvaia.provider.registry.TaskComplexity;
+import ai.kukuvaia.provider.model.TaskComplexity;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;

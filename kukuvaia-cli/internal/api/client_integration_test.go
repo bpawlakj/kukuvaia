@@ -45,7 +45,7 @@ func TestRenameSession_Integration(t *testing.T) {
 
 func TestExecuteCommand_Help_Integration(t *testing.T) {
 	client := NewClient(testServerURL)
-	blocks, err := client.ExecuteCommand("help", "", "test-integration")
+	blocks, err := client.ExecuteCommand("help", "", "test-integration", "")
 	if err != nil {
 		t.Fatalf("ExecuteCommand help failed: %v", err)
 	}

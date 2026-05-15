@@ -1,6 +1,6 @@
 package ai.kukuvaia.tools;
 
-import ai.kukuvaia.agent.daemon.ExecutionContext;
+import ai.kukuvaia.provider.model.ExecutionContext;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.subagent.WorkerResult;
 import ai.kukuvaia.agent.subagent.WorkerTask;

@@ -8,6 +8,7 @@ import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
 import org.springframework.core.Ordered;
 import org.springframework.stereotype.Component;
+import ai.kukuvaia.provider.service.ProviderAuditLog;
 
 /**
  * Injects anti-prompt-injection instructions into every conversation.

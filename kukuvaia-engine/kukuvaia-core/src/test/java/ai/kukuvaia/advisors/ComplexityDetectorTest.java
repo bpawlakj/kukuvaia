@@ -1,7 +1,7 @@
 package ai.kukuvaia.advisors;
 
 import ai.kukuvaia.agent.PlanningModeService;
-import ai.kukuvaia.provider.registry.TaskComplexity;
+import ai.kukuvaia.provider.model.TaskComplexity;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

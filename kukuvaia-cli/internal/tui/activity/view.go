@@ -272,19 +272,40 @@ func (m Model) animatorLine() string {
 		verb = "Working"
 	}
 
-	// Elapsed wall-clock from earliest in-flight node.
-	var earliest *time.Time
+	// Elapsed wall-clock. Two regimes:
+	//   • While at least one span is in-flight, count from the earliest START
+	//     timestamp across ALL nodes (so the clock ticks up live).
+	//   • Once every span has ended, the animator stays on screen until the
+	//     next turn (see handleStart's soft-reset); during that residual frame,
+	//     show the post-mortem total: latest-end minus earliest-start. Without
+	//     this the residual line drops to "(0s)" because IsInFlight() returns
+	//     false for the entire tree.
+	// Truncate to 100ms — second-truncation hid every sub-1s turn as "0s".
+	var earliestStart *time.Time
+	var latestEnd *time.Time
+	hasInFlight := false
 	for _, n := range m.nodes {
+		if earliestStart == nil || n.StartedAt.Before(*earliestStart) {
+			t := n.StartedAt
+			earliestStart = &t
+		}
 		if n.IsInFlight() {
-			if earliest == nil || n.StartedAt.Before(*earliest) {
-				t := n.StartedAt
-				earliest = &t
-			}
+			hasInFlight = true
+			continue
+		}
+		if n.EndedAt != nil && (latestEnd == nil || n.EndedAt.After(*latestEnd)) {
+			le := *n.EndedAt
+			latestEnd = &le
 		}
 	}
 	elapsed := time.Duration(0)
-	if earliest != nil {
-		elapsed = time.Since(*earliest).Truncate(time.Second)
+	if earliestStart != nil {
+		if hasInFlight {
+			elapsed = time.Since(*earliestStart)
+		} else if latestEnd != nil {
+			elapsed = latestEnd.Sub(*earliestStart)
+		}
+		elapsed = elapsed.Truncate(100 * time.Millisecond)
 	}
 
 	tokens := TotalTokens(m.nodes)

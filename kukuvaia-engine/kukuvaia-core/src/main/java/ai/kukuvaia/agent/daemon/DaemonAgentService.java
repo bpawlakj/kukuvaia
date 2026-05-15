@@ -1,5 +1,7 @@
 package ai.kukuvaia.agent.daemon;
 
+import ai.kukuvaia.provider.model.ExecutionContext;
+
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.daemon.DaemonTaskResult.DaemonTaskStatus;
 import io.micrometer.core.instrument.Counter;
@@ -12,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import ai.kukuvaia.provider.service.ProviderAuditLog;
 
 /**
  * Orchestrates daemon task execution via sub-agents.

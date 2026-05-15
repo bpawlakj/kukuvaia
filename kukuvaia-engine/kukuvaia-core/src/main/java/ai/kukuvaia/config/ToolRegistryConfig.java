@@ -30,7 +30,13 @@ public class ToolRegistryConfig {
     public ToolRegistryConfig(Collection<ToolCallbackProvider> providers) {
         for (ToolCallbackProvider provider : providers) {
             for (ToolCallback callback : provider.getToolCallbacks()) {
-                toolsByName.put(callback.getToolDefinition().name(), callback);
+                // Wrap every registered callback with the MCP error translator. The wrapper is a
+                // pure pass-through for non-MCP tools (no transport failure shape matches), so it
+                // is cheap to apply uniformly. For MCP-backed tools it converts cryptic 100-line
+                // stack traces from a stale SSE session into a one-paragraph instruction the LLM
+                // can forward to the operator without halucynowania a wrong cause.
+                ToolCallback wrapped = new McpErrorTranslatingToolCallback(callback);
+                toolsByName.put(wrapped.getToolDefinition().name(), wrapped);
             }
         }
         log.info("Tool registry initialized with {} tools: {}", toolsByName.size(), toolsByName.keySet());

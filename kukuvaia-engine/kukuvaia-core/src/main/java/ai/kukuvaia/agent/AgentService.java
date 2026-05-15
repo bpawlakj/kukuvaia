@@ -390,6 +390,14 @@ public class AgentService {
     private String sanitizeError(Exception e) {
         String msg = e.getMessage();
         if (msg == null) return "Unexpected error";
+        // 408 + litellm.Timeout — Sanoma SmartGate's LiteLLM proxy enforces a hard 10s timeout
+        // per upstream call. Big tool-result payloads (e.g. 50+ validation rules per template)
+        // routinely exceed it. Surface this clearly so the operator knows to ask for a smaller
+        // slice rather than re-trying the same prompt.
+        if (msg.contains("litellm.Timeout") || msg.contains("408 Request Timeout")) {
+            return "LLM proxy timed out (SmartGate's 10s budget). Likely too much tool data in "
+                    + "this turn — ask for a smaller slice, e.g. 'first 10 rules' or 'next page'.";
+        }
         if (msg.contains("Timeout") || msg.contains("timed out")) {
             return "Request timed out. The LLM provider did not respond in time. Try again or use a simpler prompt.";
         }

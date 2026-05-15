@@ -5,15 +5,19 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -54,8 +58,43 @@ public class PersonaService {
         log.info("Session {} switched to persona '{}'", sessionId, personaName);
     }
 
+    /**
+     * Bind the session to the named persona iff a non-blank name is provided. Used by the chat /
+     * command HTTP entry points so the CLI can push {@code KUKUVAIA_PERSONA} on every request
+     * without forcing every other caller to know whether the session is already bound.
+     *
+     * <p>No-op for null/blank input. Throws {@link IllegalArgumentException} for unknown personas
+     * — controllers translate that into a 400 so the operator sees the typo immediately rather
+     * than getting silent fallback to {@code assistant}.
+     */
+    public void applyIfPresent(String sessionId, String personaName) {
+        if (personaName == null || personaName.isBlank()) {
+            return;
+        }
+        setActivePersona(sessionId, personaName);
+    }
+
     public Map<String, PersonaSpec> allPersonas() {
         return Map.copyOf(personas);
+    }
+
+    /**
+     * Union of every named (non-default) persona's {@code toolFilter}.
+     *
+     * <p>Used by {@code /help} to draw the line between "general" tools (always reachable, regardless
+     * of which persona is active — typically internal kukuvaia tools like planning) and
+     * "persona-specific" tools (only reachable when a particular persona is active — typically MCP
+     * tools mounted by that persona). The default persona contributes nothing because its
+     * {@code toolFilter} is empty (= "no opinion, all tools allowed").
+     */
+    public Set<String> namedPersonaToolUnion() {
+        Set<String> union = new LinkedHashSet<>();
+        for (var entry : personas.entrySet()) {
+            if (DEFAULT_PERSONA.equals(entry.getKey())) continue;
+            List<String> tf = entry.getValue().toolFilter();
+            if (tf != null) union.addAll(tf);
+        }
+        return union;
     }
 
     public void loadFromDirectory(Path directory) {
@@ -70,7 +109,32 @@ public class PersonaService {
 
     private void loadBuiltInPersonas() {
         personas.put(DEFAULT_PERSONA, createDefaultPersona());
-        log.info("Loaded {} built-in persona(s)", personas.size());
+        loadFromClasspath();
+        log.info("Loaded {} built-in persona(s): {}", personas.size(), personas.keySet());
+    }
+
+    /**
+     * Load every {@code classpath:personas/*.yaml} into the registry. Built-in classpath personas
+     * carry feature-specific system prompts and tool whitelists (e.g. {@code validator},
+     * {@code rule-editor}); they ship with the engine and are loaded once at startup.
+     */
+    private void loadFromClasspath() {
+        try {
+            var resolver = new PathMatchingResourcePatternResolver();
+            Resource[] resources = resolver.getResources("classpath:personas/*.yaml");
+            for (Resource resource : resources) {
+                try (InputStream is = resource.getInputStream()) {
+                    PersonaSpec spec = yamlMapper.readValue(is, PersonaSpec.class);
+                    personas.put(spec.name(), spec);
+                    log.info("Loaded built-in persona '{}' from classpath:personas/{}",
+                            spec.name(), resource.getFilename());
+                } catch (IOException e) {
+                    log.warn("Failed to parse persona resource {}: {}", resource.getFilename(), e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Failed to enumerate classpath:personas/*.yaml: {}", e.getMessage());
+        }
     }
 
     private PersonaSpec createDefaultPersona() {

@@ -43,7 +43,7 @@ func TestE2E_SlashCommands(t *testing.T) {
 	client := NewClient(testServerURL)
 
 	// /help → should return TableBlock + TextBlock
-	blocks, err := client.ExecuteCommand("help", "", "test-e2e")
+	blocks, err := client.ExecuteCommand("help", "", "test-e2e", "")
 	if err != nil {
 		t.Fatalf("/help: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestE2E_SlashCommands(t *testing.T) {
 	}
 
 	// /model list → should return TextBlock
-	blocks, err = client.ExecuteCommand("model", "list", "test-e2e")
+	blocks, err = client.ExecuteCommand("model", "list", "test-e2e", "")
 	if err != nil {
 		t.Fatalf("/model list: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestE2E_SlashCommands(t *testing.T) {
 	}
 
 	// /login status → should return TextBlock
-	blocks, err = client.ExecuteCommand("login", "status", "test-e2e")
+	blocks, err = client.ExecuteCommand("login", "status", "test-e2e", "")
 	if err != nil {
 		t.Fatalf("/login status: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestE2E_ChatWithToolUse(t *testing.T) {
 	client := NewClient(testServerURL)
 
 	// Ask agent to list its tools — tests that LLM responds with tool info
-	blocks, errs := client.Chat("test-e2e-tools", "What tools do you have available? Just list their names briefly.")
+	blocks, errs := client.Chat("test-e2e-tools", "What tools do you have available? Just list their names briefly.", "")
 
 	var received []OutputBlock
 	timeout := time.After(90 * time.Second)
@@ -117,7 +117,7 @@ func TestE2E_DeleteSession(t *testing.T) {
 	client := NewClient(testServerURL)
 
 	// First create a session by chatting
-	blocks, errs := client.Chat("test-e2e-delete-me", "hi")
+	blocks, errs := client.Chat("test-e2e-delete-me", "hi", "")
 	for range blocks {
 	}
 	for range errs {

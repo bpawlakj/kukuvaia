@@ -1,7 +1,7 @@
 package ai.kukuvaia.agents.config
 
-import ai.kukuvaia.provider.registry.ChatModelCache
-import ai.kukuvaia.provider.registry.ModelRoleRepository
+import ai.kukuvaia.provider.service.ChatModelCache
+import ai.kukuvaia.provider.repository.ModelRoleRepository
 import com.embabel.common.ai.model.*
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.model.ChatModel

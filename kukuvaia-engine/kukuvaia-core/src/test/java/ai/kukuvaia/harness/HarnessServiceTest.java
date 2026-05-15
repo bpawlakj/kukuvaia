@@ -3,176 +3,170 @@ package ai.kukuvaia.harness;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.when;
 
-@DisplayName("HarnessService — rule resolution and hierarchy")
-@ExtendWith(MockitoExtension.class)
+/**
+ * Behaviour of {@link HarnessService} with the file-backed store. Uses an in-memory fake store
+ * so the test is fully hermetic — no temp directories, no Mockito ceremony for the read API.
+ */
+@DisplayName("HarnessService — file-backed resolution")
 class HarnessServiceTest {
 
-    @Mock private RuleSetRepository ruleSetRepository;
-    @Mock private RuleRepository ruleRepository;
-    @Mock private GroupRepository groupRepository;
-
+    private FakeStore store;
     private HarnessService service;
-
-    private final String userId = "test-user-123";
-    private final UUID groupId = UUID.randomUUID();
 
     @BeforeEach
     void setUp() {
-        service = new HarnessService(ruleSetRepository, ruleRepository, groupRepository);
-    }
-
-    private RuleSetRecord ruleSet(UUID id, String scope, String ownerType, Object ownerId) {
-        return new RuleSetRecord(id, "test", null, scope, ownerType,
-                ownerId != null ? ownerId.toString() : null,
-                0, true, Instant.now(), Instant.now());
-    }
-
-    private RuleRecord rule(String key, String type, String content) {
-        return new RuleRecord(UUID.randomUUID(), UUID.randomUUID(), key, type, content,
-                List.of(), Map.of("always", true), 0, true, 1, Instant.now(), Instant.now());
+        store = new FakeStore();
+        service = new HarnessService(store);
     }
 
     @Test
     @DisplayName("no rules — returns empty string")
-    void noRules_returnsEmpty() {
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of());
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of());
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
-
-        String result = service.compileRules(userId);
-
-        assertThat(result).isEmpty();
+    void noRules_empty() {
+        assertThat(service.resolveForUser("bartek")).isEmpty();
+        assertThat(service.resolveForUser(null)).isEmpty();
     }
 
     @Test
-    @DisplayName("platform rules — included for all users")
-    void platformRules_included() {
-        UUID rsId = UUID.randomUUID();
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of(ruleSet(rsId, "platform", "system", null)));
-        when(ruleRepository.findByRuleSetId(rsId)).thenReturn(List.of(
-                rule("di", "instruction", "Use constructor injection only")
-        ));
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of());
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
+    @DisplayName("platform rules apply to everyone (including null userId for agent runs)")
+    void platformRules_applyToAll() {
+        store.add(rule("di", "di", "platform", "instruction", "Use constructor injection only.", 0, true));
 
-        String result = service.compileRules(userId);
-
-        assertThat(result).contains("constructor injection");
-        assertThat(result).contains("Instructions");
+        assertThat(service.resolveForUser("alice")).contains("constructor injection");
+        assertThat(service.resolveForUser(null)).contains("constructor injection");
     }
 
     @Test
-    @DisplayName("group rules — included for group members")
-    void groupRules_includedForMembers() {
-        UUID rsId = UUID.randomUUID();
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of());
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of(groupId));
-        when(ruleSetRepository.findByOwner("group", groupId)).thenReturn(List.of(ruleSet(rsId, "group", "group", groupId)));
-        when(ruleRepository.findByRuleSetId(rsId)).thenReturn(List.of(
-                rule("framework", "context", "This team uses Spring Boot 3.4")
-        ));
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
+    @DisplayName("user rules apply only to that user; not visible to anonymous resolves")
+    void userRules_scoped() {
+        store.add(rule("verbose", "verbose", "user:bartek", "preference", "Use verbose explanations.", 0, true));
 
-        String result = service.compileRules(userId);
-
-        assertThat(result).contains("Spring Boot 3.4");
-        assertThat(result).contains("Context");
+        assertThat(service.resolveForUser("bartek")).contains("verbose explanations");
+        assertThat(service.resolveForUser("alice")).isEmpty();
+        assertThat(service.resolveForUser(null)).isEmpty();
     }
 
     @Test
-    @DisplayName("user rule overrides group rule — same key")
-    void userOverridesGroup_sameKey() {
-        UUID groupRsId = UUID.randomUUID();
-        UUID userRsId = UUID.randomUUID();
+    @DisplayName("user rule overrides platform rule on same key")
+    void userOverridesPlatform() {
+        store.add(rule("style", "style", "platform", "preference", "Be concise.", 0, true));
+        store.add(rule("verbose-style", "style", "user:bartek", "preference", "Be verbose for me.", 0, true));
 
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of());
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of(groupId));
-        when(ruleSetRepository.findByOwner("group", groupId)).thenReturn(List.of(ruleSet(groupRsId, "group", "group", groupId)));
-        when(ruleRepository.findByRuleSetId(groupRsId)).thenReturn(List.of(
-                rule("testing", "instruction", "Use Hamcrest for assertions")
-        ));
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of(ruleSet(userRsId, "user", "user", userId)));
-        when(ruleRepository.findByRuleSetId(userRsId)).thenReturn(List.of(
-                rule("testing", "instruction", "Use AssertJ for assertions")
-        ));
-
-        String result = service.compileRules(userId);
-
-        assertThat(result).contains("AssertJ");
-        assertThat(result).doesNotContain("Hamcrest");
+        // platform-only resolution sees just the platform rule
+        assertThat(service.resolveForUser(null)).contains("Be concise");
+        // bartek's resolution overrides via shared key
+        String compiled = service.resolveForUser("bartek");
+        assertThat(compiled).contains("Be verbose for me");
+        assertThat(compiled).doesNotContain("Be concise");
     }
 
     @Test
-    @DisplayName("multiple rule types — grouped by type in output")
-    void multipleTypes_grouped() {
-        UUID rsId = UUID.randomUUID();
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of(ruleSet(rsId, "platform", "system", null)));
-        when(ruleRepository.findByRuleSetId(rsId)).thenReturn(List.of(
-                rule("di", "instruction", "Use constructor injection"),
-                rule("no-autowired", "constraint", "Never use @Autowired on fields"),
-                rule("team-info", "context", "Java 21 project")
-        ));
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of());
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
+    @DisplayName("disabled rules are dropped at compile, never reach LLM")
+    void disabledRules_skipped() {
+        store.add(rule("active", "a", "platform", "instruction", "Active rule body.", 0, true));
+        store.add(rule("inactive", "b", "platform", "instruction", "Inactive rule body.", 0, false));
 
-        String result = service.compileRules(userId);
-
-        assertThat(result).contains("### Instructions");
-        assertThat(result).contains("### Constraints");
-        assertThat(result).contains("### Context");
+        String compiled = service.resolveForUser(null);
+        assertThat(compiled).contains("Active rule body");
+        assertThat(compiled).doesNotContain("Inactive rule body");
     }
 
     @Test
-    @DisplayName("null userId — only platform rules")
-    void nullUserId_platformOnly() {
-        UUID rsId = UUID.randomUUID();
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of(ruleSet(rsId, "platform", "system", null)));
-        when(ruleRepository.findByRuleSetId(rsId)).thenReturn(List.of(
-                rule("safe", "instruction", "Be safe")
-        ));
+    @DisplayName("rules grouped by type with priority desc, name asc within each section")
+    void groupingAndOrdering() {
+        store.add(rule("a-instr", "ai", "platform", "instruction", "First instr.", 0, true));
+        store.add(rule("b-instr", "bi", "platform", "instruction", "Second instr.", 10, true));
+        store.add(rule("c-cons", "cc", "platform", "constraint", "A constraint.", 0, true));
 
-        String result = service.compileRules(null);
+        String compiled = service.resolveForUser(null);
+        // Higher priority comes first within Instructions section
+        int second = compiled.indexOf("Second instr");
+        int first = compiled.indexOf("First instr");
+        assertThat(second).isLessThan(first);
 
-        assertThat(result).contains("Be safe");
+        // Section headers exist
+        assertThat(compiled).contains("### Instructions");
+        assertThat(compiled).contains("### Constraints");
     }
 
     @Test
-    @DisplayName("cache — second call uses cached value")
-    void cache_secondCallUsesCached() {
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of());
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of());
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
+    @DisplayName("cache: second resolve hits cache (single store.loadAll call per cacheKey)")
+    void cache_secondResolveHitsCache() {
+        store.add(rule("x", "x", "platform", "instruction", "body", 0, true));
 
-        service.resolveForUser(userId);
-        service.resolveForUser(userId);
+        service.resolveForUser("alice");
+        service.resolveForUser("alice");
 
-        // findByScope called only once (second call hits cache)
-        org.mockito.Mockito.verify(ruleSetRepository, org.mockito.Mockito.times(1)).findByScope("platform");
+        assertThat(store.loadAllCalls.get()).isEqualTo(1);
     }
 
     @Test
-    @DisplayName("invalidateCache — forces re-resolution")
-    void invalidateCache_forcesReResolution() {
-        when(ruleSetRepository.findByScope("platform")).thenReturn(List.of());
-        when(groupRepository.findGroupIdsByUserId(userId)).thenReturn(List.of());
-        when(ruleSetRepository.findByOwner("user", userId)).thenReturn(List.of());
+    @DisplayName("anonymous resolves share the sentinel cache key (P23 agent runs)")
+    void anonymousResolve_sharesCacheKey() {
+        store.add(rule("x", "x", "platform", "instruction", "body", 0, true));
 
-        service.resolveForUser(userId);
-        service.invalidateCache(userId);
-        service.resolveForUser(userId);
+        service.resolveForUser(null);
+        service.resolveForUser(null);
 
-        org.mockito.Mockito.verify(ruleSetRepository, org.mockito.Mockito.times(2)).findByScope("platform");
+        assertThat(store.loadAllCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("invalidateCache(null) does not NPE and forces re-resolution")
+    void invalidateAnonymous_doesNotNpe() {
+        store.add(rule("x", "x", "platform", "instruction", "body", 0, true));
+
+        service.resolveForUser(null);
+        service.invalidateCache(null);
+        service.resolveForUser(null);
+
+        assertThat(store.loadAllCalls.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("invalidateAllCaches forces every key to re-resolve")
+    void invalidateAll_clearsEverything() {
+        store.add(rule("x", "x", "platform", "instruction", "body", 0, true));
+
+        service.resolveForUser("alice");
+        service.resolveForUser(null);
+        service.invalidateAllCaches();
+        service.resolveForUser("alice");
+        service.resolveForUser(null);
+
+        assertThat(store.loadAllCalls.get()).isEqualTo(4);
+    }
+
+    // --- helpers --------------------------------------------------------
+
+    private static HarnessRule rule(String name, String key, String scope, String type,
+                                    String content, int priority, boolean enabled) {
+        return new HarnessRule(name, key, scope, type, content, priority, enabled, List.of());
+    }
+
+    /** In-memory store that counts loadAll calls so we can assert cache behavior precisely. */
+    static final class FakeStore implements HarnessRuleStore {
+        final List<HarnessRule> rules = new ArrayList<>();
+        final AtomicInteger loadAllCalls = new AtomicInteger();
+
+        void add(HarnessRule r) { rules.add(r); }
+
+        @Override public List<HarnessRule> loadAll() {
+            loadAllCalls.incrementAndGet();
+            return List.copyOf(rules);
+        }
+
+        @Override public Optional<String> readRaw(String name) { return Optional.empty(); }
+
+        @Override public List<String> listNames() {
+            return rules.stream().map(HarnessRule::name).toList();
+        }
     }
 }

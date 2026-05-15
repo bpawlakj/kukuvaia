@@ -1,11 +1,14 @@
 package ai.kukuvaia.security;
 
+import org.apache.catalina.connector.ClientAbortException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -47,6 +50,36 @@ public class ErrorSanitizer {
             Pattern.compile("at\\s+[a-z]+(\\.[a-z]+)+\\(\\w+\\.java:\\d+\\)",
                     Pattern.CASE_INSENSITIVE),
     };
+
+    /**
+     * 404 for unmapped paths (Spring's {@code NoResourceFoundException}). These are routine —
+     * SockJS heartbeat probes ({@code /ws/info}), favicon requests, scanner traffic — and must
+     * not be logged at ERROR with full stack traces. Returns a clean 404 with no body so we
+     * don't leak the requested path back to the caller.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Void> handleNoResource(NoResourceFoundException ex) {
+        log.debug("404 No static resource: {}", ex.getResourcePath());
+        return ResponseEntity.notFound().build();
+    }
+
+    /**
+     * Client-disconnect during an in-flight SSE stream — Tomcat's {@code ClientAbortException}
+     * wrapped by Spring's {@code AsyncRequestNotUsableException}. The peer (CLI / browser) closed
+     * the socket; we cannot write a response back. Logging this at ERROR with a stack trace is
+     * pure noise — the request is dead, there's nothing to fix. Without this handler the
+     * generic {@link #handleAll} below tries to render a JSON error body, fails because the SSE
+     * response Content-Type has no Map converter, and the resulting secondary exception
+     * (HttpMessageNotWritableException) buries the original cause.
+     *
+     * <p>Returning {@code null} from a {@code @RestControllerAdvice} handler tells Spring to
+     * treat the exception as resolved without writing a body — exactly right for a dead socket.
+     */
+    @ExceptionHandler({AsyncRequestNotUsableException.class, ClientAbortException.class})
+    public ResponseEntity<Void> handleClientDisconnect(Exception ex) {
+        log.debug("Client disconnected during async stream: {}", ex.getMessage());
+        return null;
+    }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, String>> handleAll(Exception ex) {

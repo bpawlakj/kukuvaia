@@ -1,6 +1,11 @@
 package ai.kukuvaia.dream;
 
-import ai.kukuvaia.provider.registry.*;
+import ai.kukuvaia.provider.model.*;
+import ai.kukuvaia.provider.repository.*;
+import ai.kukuvaia.provider.service.*;
+import ai.kukuvaia.provider.secret.*;
+import ai.kukuvaia.provider.dto.*;
+import ai.kukuvaia.provider.transport.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,6 +18,13 @@ import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
+import ai.kukuvaia.provider.model.ModelRecord;
+import ai.kukuvaia.provider.repository.ModelRepository;
+import ai.kukuvaia.provider.model.ModelRoleRecord;
+import ai.kukuvaia.provider.repository.ModelRoleRepository;
+import ai.kukuvaia.provider.model.ProviderRecord;
+import ai.kukuvaia.provider.repository.ProviderRepository;
+import ai.kukuvaia.provider.secret.SecretResolver;
 
 @DisplayName("DreamService — health check and config audit")
 @ExtendWith(MockitoExtension.class)

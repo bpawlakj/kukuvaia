@@ -1,7 +1,7 @@
 package ai.kukuvaia.advisors;
 
-import ai.kukuvaia.provider.registry.ChatModelCache;
-import ai.kukuvaia.provider.registry.TaskComplexity;
+import ai.kukuvaia.provider.service.ChatModelCache;
+import ai.kukuvaia.provider.model.TaskComplexity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.SystemMessage;

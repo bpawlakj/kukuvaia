@@ -1,0 +1,14 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/api/internal/validation-context/outlines/[^/]+/snapshot/stream"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/x-ndjson",
+      "Authorization": "Bearer phase2-test-token"
+    },
+    "body": "{\"type\":\"header\",\"outlineId\":\"phase2-outline\",\"outlineTemplateId\":\"phase2-template\",\"metadataCategories\":[]}\n{\"type\":\"section\",\"data\":{\"id\":\"sec-1\",\"title\":\"Lesson 1 — Fractions\",\"sectionTypeId\":\"Lesson\",\"childSectionIds\":[]}}\n{\"type\":\"contentItem\",\"data\":{\"id\":\"ci-1\",\"contentItemTypeId\":\"TEXT_V2\",\"sectionId\":\"sec-1\"}}\n{\"type\":\"end\",\"checksum\":\"sha256:phase2-smoke-fixture\"}\n"
+  }
+}

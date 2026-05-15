@@ -4,7 +4,12 @@ import ai.kukuvaia.dream.DreamRecommendationRecord;
 import ai.kukuvaia.dream.DreamReportRecord;
 import ai.kukuvaia.dream.DreamService;
 import ai.kukuvaia.harness.HarnessService;
-import ai.kukuvaia.provider.registry.*;
+import ai.kukuvaia.provider.model.*;
+import ai.kukuvaia.provider.repository.*;
+import ai.kukuvaia.provider.service.*;
+import ai.kukuvaia.provider.secret.*;
+import ai.kukuvaia.provider.dto.*;
+import ai.kukuvaia.provider.transport.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -13,6 +18,10 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import ai.kukuvaia.provider.service.ChatModelCache;
+import ai.kukuvaia.provider.service.ComplexityMappingService;
+import ai.kukuvaia.provider.repository.ModelRoleRepository;
+import ai.kukuvaia.provider.service.ProviderRegistryService;
 
 /**
  * Dashboard endpoints for admin UI. Aggregates system state across all subsystems.
@@ -76,9 +85,8 @@ public class DashboardController {
         overview.put("cachedModels", chatModelCache.size());
         overview.put("cachedRoles", chatModelCache.roleCount());
 
-        // Harness
-        overview.put("groupCount", harnessService.listGroups().size());
-        overview.put("ruleSetCount", harnessService.listRuleSets().size());
+        // Harness — file-backed store, single rules dimension (groups/rule-sets dropped with V20)
+        overview.put("ruleCount", harnessService.listAll().size());
 
         // Dream
         var pendingRecs = dreamService.getPendingRecommendations();

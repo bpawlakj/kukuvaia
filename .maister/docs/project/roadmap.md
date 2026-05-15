@@ -267,7 +267,7 @@ Quick reference — which plan document belongs to which milestone:
 | **P01.1 CLI Activity Tracker** | 2A.1 | **✅ SHIPPED** | P01 SpanEventBlock |
 | P02 Structured Output | 1A/2A | Draft | none |
 | P03 Model Fallback Chain | 3A | Draft | P01 |
-| P04 Conversation Summarization | 3B | Draft | kukuvaia-memory (✅) |
+| ~~P04 Conversation Summarization~~ | 3B | **Superseded by P24** | — |
 | P05 Eval Pipeline | 3A | Draft | P01 (✅) |
 | P06 Content Moderation | 3A | Draft | none |
 | P07 Cost Tracking | 3A | Draft | P01 (✅) |
@@ -286,6 +286,7 @@ Quick reference — which plan document belongs to which milestone:
 | **P20 Routing Self-Tuning via Dreaming** | 4H | Draft | P19 Phase 1 (shadow mode telemetry); P12 / `DreamService` + V9 tables (✅) |
 | **P21 Plan Registry & Composition** | 4I | Draft | P13 (✅); `plans` table V4 (✅); `SessionPicker` (✅); `@Tool` (✅) |
 | **P22 MCP Integration with sl-content** | 4J | Draft | `spring-ai-starter-mcp-client` (✅); `ToolResultSanitizingAdvisor` (✅); sl-content retrieval services (✅, external repo) |
+| **P24 Context Compaction (token-threshold, unified)** | 3A/3B | **Phase A shipped; B–E pending — see [T16](../../../docs/tasks/T16-context-compaction-phases-bcde.md)** | replaces `TokenBudgetAdvisor` (✅ removed); supersedes P04; P08 cache markers must respect pinning (Phase E) |
 | `open-source-release.md` | 1C / 1D | Draft | LICENSE + CONTRIBUTING |
 
 **Critical path for MVP launch**: `1B` (Docker) + `1C` (README/LICENSE) + `1D` (CI) + `1E` (hardening). Everything P0x is infrastructure that already exists or can ship in parallel.
@@ -308,4 +309,4 @@ Quick reference — which plan document belongs to which milestone:
 
 **Effort Scale**: `S` 2–3 days | `M` ~1 week | `L` 2+ weeks | `XL` 1+ month
 
-*Last updated: 2026-04-20 (4D / P14 + 4C / P15 expanded — Villani research R1+R2: small-supervisor mode in P14, Pillar 5 VerificationEngine + Phase 7 determinism extensions in P15, partial P14 implementation of verbosity config; 4J / P22 draft — MCP bridge to sl-content corpus, first realisation of P15 Pillar 4; 4I / P21 draft — plan registry & composition; 4H / P20 draft — routing self-tuning; P15 Pillar 2 expanded; 4G / P19 Phase 1 shipped)*
+*Last updated: 2026-05-15 (P24 Phase A shipped — `TokenEstimator` + `ContextCompactionAdvisor` wired into the chain, dead-code `TokenBudgetAdvisor` removed, full test coverage. Remaining Phases B/C/D/E captured as handoff doc in [`docs/tasks/T16-context-compaction-phases-bcde.md`](../../../docs/tasks/T16-context-compaction-phases-bcde.md) — Phase B is highest-leverage next step.)*

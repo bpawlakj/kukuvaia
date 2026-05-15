@@ -11,6 +11,7 @@ java {
 dependencies {
     // Kukuvaia modules
     api project(':kukuvaia-memory')
+    api project(':kukuvaia-provider')
 
     // Spring Boot
     api 'org.springframework.boot:spring-boot-starter-web'

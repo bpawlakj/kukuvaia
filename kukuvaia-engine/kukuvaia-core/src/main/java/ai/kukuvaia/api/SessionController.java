@@ -1,5 +1,6 @@
 package ai.kukuvaia.api;
 
+import ai.kukuvaia.agent.PersonaService;
 import ai.kukuvaia.agent.PlanningModeService;
 import ai.kukuvaia.memory.model.KukuvaiaSession;
 import ai.kukuvaia.memory.repository.SessionRepository;
@@ -21,13 +22,16 @@ public class SessionController {
     private final ChatMemoryRepository chatMemoryRepository;
     private final SessionRepository sessionRepository;
     private final PlanningModeService planningModeService;
+    private final PersonaService personaService;
 
     public SessionController(ChatMemoryRepository chatMemoryRepository,
                              SessionRepository sessionRepository,
-                             PlanningModeService planningModeService) {
+                             PlanningModeService planningModeService,
+                             PersonaService personaService) {
         this.chatMemoryRepository = chatMemoryRepository;
         this.sessionRepository = sessionRepository;
         this.planningModeService = planningModeService;
+        this.personaService = personaService;
     }
 
     /**
@@ -109,6 +113,30 @@ public class SessionController {
                         )
                 )))
                 .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Bind a persona to this session for subsequent chat / command requests.
+     *
+     * <p>Body: {@code {"persona": "rule-editor"}}. Returns 400 with an explanation when the
+     * persona name does not exist — caller decides whether to retry or fall back. Used by ad-hoc
+     * persona switching from the CLI; the CLI also pushes persona on every chat request, so this
+     * endpoint is mainly useful for tooling and diagnostics.
+     */
+    @PutMapping("/{id}/persona")
+    public ResponseEntity<Map<String, Object>> setPersona(
+            @PathVariable String id,
+            @RequestBody Map<String, String> body) {
+        String persona = body != null ? body.getOrDefault("persona", "") : "";
+        if (persona.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "persona is required"));
+        }
+        try {
+            personaService.setActivePersona(id, persona);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+        return ResponseEntity.ok(Map.of("sessionId", id, "persona", persona));
     }
 
     /**

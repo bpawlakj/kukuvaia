@@ -1,7 +1,11 @@
 package ai.kukuvaia.api;
 
-import ai.kukuvaia.provider.registry.*;
-
+import ai.kukuvaia.provider.model.*;
+import ai.kukuvaia.provider.repository.*;
+import ai.kukuvaia.provider.service.*;
+import ai.kukuvaia.provider.secret.*;
+import ai.kukuvaia.provider.dto.*;
+import ai.kukuvaia.provider.transport.*;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -9,6 +13,16 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import ai.kukuvaia.provider.repository.ComplexityMappingRepository;
+import ai.kukuvaia.provider.service.ComplexityMappingService;
+import ai.kukuvaia.provider.service.ModelDiscoveryClient;
+import ai.kukuvaia.provider.dto.ModelResponse;
+import ai.kukuvaia.provider.model.ModelRoleAssignment;
+import ai.kukuvaia.provider.dto.ModelRoleResponse;
+import ai.kukuvaia.provider.dto.ModelTestResult;
+import ai.kukuvaia.provider.service.ProviderRegistryService;
+import ai.kukuvaia.provider.secret.SecretResolver;
+import ai.kukuvaia.provider.dto.UpdateModelRequest;
 
 /**
  * Model and role management endpoints.

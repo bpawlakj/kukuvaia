@@ -57,6 +57,7 @@ class OutputBlockTest {
             case VerificationBlock v -> "verification";
             case MetadataBlock m -> "metadata";
             case SpanEventBlock s -> "span_event";
+            case ChoiceBlock c -> "choice";
         };
         assertThat(type).isEqualTo("text");
     }

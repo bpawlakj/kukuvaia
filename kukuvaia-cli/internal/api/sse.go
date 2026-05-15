@@ -12,7 +12,9 @@ import (
 
 // Chat sends a message via SSE and returns channels for blocks and errors.
 // The blocks channel is closed when the stream ends.
-func (c *Client) Chat(sessionID, message string) (<-chan OutputBlock, <-chan error) {
+// persona is forwarded so the engine (re)binds the session to that persona before routing —
+// this is what makes KUKUVAIA_PERSONA=rule-editor actually shape the LLM tool whitelist.
+func (c *Client) Chat(sessionID, message, persona string) (<-chan OutputBlock, <-chan error) {
 	blocks := make(chan OutputBlock, 8)
 	errs := make(chan error, 1)
 
@@ -20,8 +22,8 @@ func (c *Client) Chat(sessionID, message string) (<-chan OutputBlock, <-chan err
 		defer close(blocks)
 		defer close(errs)
 
-		log.Printf("[SSE] Chat request: sessionId=%s, msgLen=%d", sessionID, len(message))
-		body, _ := json.Marshal(ChatRequest{SessionID: sessionID, Message: message})
+		log.Printf("[SSE] Chat request: sessionId=%s, persona=%q, msgLen=%d", sessionID, persona, len(message))
+		body, _ := json.Marshal(ChatRequest{SessionID: sessionID, Message: message, Persona: persona})
 		req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/api/chat", bytes.NewReader(body))
 		if err != nil {
 			errs <- fmt.Errorf("chat: create request: %w", err)

@@ -9,6 +9,16 @@ kukuvaia:
   webhooks:
     rate-limit-per-minute: 10
     secret: ${WEBHOOK_SECRET:}
+  providers:
+    copilot:
+      # GitHub Copilot OAuth device flow. Defaults match the public client ID used
+      # by the official VS Code / JetBrains / GitHub CLI plugins, so no per-user
+      # registration is needed. Override only for testing against a stub.
+      client-id: ${KUKUVAIA_COPILOT_CLIENT_ID:Iv1.b507a08c87ecfe98}
+      scope: ${KUKUVAIA_COPILOT_SCOPE:read:user}
+      # The long-lived GitHub OAuth token is persisted here with chmod 600.
+      # Short-lived (~25 min) Copilot bearer tokens stay in-memory.
+      credentials-path: ${KUKUVAIA_COPILOT_CREDENTIALS_PATH:}
   security:
     strict-permissions: true
     dev-mode: ${KUKUVAIA_SECURITY_DEV_MODE:true}
@@ -43,6 +53,16 @@ spring:
   application:
     name: kukuvaia-engine
   ai:
+    # Spring AI's default RetryTemplate is brutal: 10 attempts with exponential backoff to ~3min.
+    # When SmartGate's 10-second LiteLLM proxy timeout fires (TransientAiException 408), the
+    # default chews up 3+ minutes wiggling on the same dead request. We cap to 2 attempts with
+    # ≤5s backoff so a flaky upstream bubbles up to the operator within ~15s, not 3 minutes.
+    retry:
+      max-attempts: 2
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 5s
     openai:
       base-url: ${LLM_BASE_URL:https://api.openai.com}
       api-key: ${LLM_API_KEY:not-used}
@@ -76,7 +96,12 @@ spring:
         enabled: ${KUKUVAIA_MCP_CLIENT_ENABLED:false}
         name: kukuvaia-engine
         version: 0.1.0
-        request-timeout: 30s
+        # 60s — covers cold ETSL queries (e.g. outline-template listing pulling sectiontypes /
+        # metadata / publication-suite per row) and slower MongoDB round-trips on shared dev
+        # boxes. The previous 30s default tripped on the rule-editor's `find_outline_templates`
+        # call when ETSL was warming up its caches; a 2× headroom is cheap and avoids spurious
+        # tool-loop aborts.
+        request-timeout: 60s
         type: SYNC
         toolcallback:
           enabled: true

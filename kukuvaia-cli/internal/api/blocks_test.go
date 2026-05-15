@@ -136,6 +136,30 @@ func TestParseOutputBlock_MetadataBlock(t *testing.T) {
 	}
 }
 
+func TestParseOutputBlock_ChoiceBlock(t *testing.T) {
+	data := `{"choiceId":"abc-123","prompt":"Pick one","options":[` +
+		`{"value":"t-1","label":"Sisko MR","description":"PUBLISHED · sanomapro"},` +
+		`{"value":"t-2","label":"Sisko MR Utbildning","description":"PUBLISHED · sanomapro"}` +
+		`]}`
+	block, err := ParseOutputBlock([]byte(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cb, ok := block.(ChoiceBlock)
+	if !ok {
+		t.Fatalf("expected ChoiceBlock, got %T", block)
+	}
+	if cb.ChoiceID != "abc-123" || cb.Prompt != "Pick one" {
+		t.Errorf("choiceId/prompt mismatch: %+v", cb)
+	}
+	if len(cb.Options) != 2 {
+		t.Fatalf("options len = %d, want 2", len(cb.Options))
+	}
+	if cb.Options[0].Value != "t-1" || cb.Options[0].Label != "Sisko MR" {
+		t.Errorf("option[0] = %+v", cb.Options[0])
+	}
+}
+
 func TestParseOutputBlock_UnknownFallback(t *testing.T) {
 	data := `{"foo":"bar","baz":123}`
 	block, err := ParseOutputBlock([]byte(data))

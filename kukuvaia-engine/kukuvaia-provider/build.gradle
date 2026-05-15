@@ -1,0 +1,34 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+dependencies {
+    // Spring AI — OpenAI client (used by OpenAiChatCompletionsTransport via Spring AI's OpenAiChatModel),
+    // ChatClient types, ToolCallback, ToolCallingChatOptions. Brings Spring Web's RestClient transitively.
+    api 'org.springframework.ai:spring-ai-starter-model-openai'
+    api 'org.springframework.ai:spring-ai-client-chat'
+    api 'org.springframework.ai:spring-ai-model'
+
+    // JDBC repositories
+    api 'org.springframework.boot:spring-boot-starter-jdbc'
+
+    // Jackson — used everywhere for JSON serialisation of request/response bodies
+    api 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Observability hook for ProviderAuditLog
+    api 'io.micrometer:micrometer-core'
+
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.assertj:assertj-core'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

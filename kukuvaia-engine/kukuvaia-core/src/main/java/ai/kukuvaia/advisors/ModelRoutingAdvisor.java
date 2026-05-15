@@ -1,10 +1,10 @@
 package ai.kukuvaia.advisors;
 
 import ai.kukuvaia.agent.SessionEscalationService;
-import ai.kukuvaia.provider.registry.ChatModelCache;
-import ai.kukuvaia.provider.registry.ComplexityMappingService;
-import ai.kukuvaia.provider.registry.ModelRecord;
-import ai.kukuvaia.provider.registry.ModelRepository;
+import ai.kukuvaia.provider.service.ChatModelCache;
+import ai.kukuvaia.provider.service.ComplexityMappingService;
+import ai.kukuvaia.provider.model.ModelRecord;
+import ai.kukuvaia.provider.repository.ModelRepository;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -38,7 +38,7 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
     private static final Logger log = LoggerFactory.getLogger(ModelRoutingAdvisor.class);
 
     static final String CTX_ESCALATE = "kukuvaia.escalate";
-    static final String CTX_ROUTED_MODEL = "kukuvaia.routed-model";
+    public static final String CTX_ROUTED_MODEL = "kukuvaia.routed-model";
     static final String CTX_ROUTING_DECISION = "kukuvaia.routing-decision";
 
     // ThreadLocal used by observability (AgentService supervisor span) to read
@@ -62,12 +62,6 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
         LAST_DECISION.remove();
         LAST_MODEL.remove();
     }
-
-    private static final Set<String> GREETING_WORDS = Set.of(
-            "hi", "hello", "hey", "cześć", "hej", "siema", "yo", "thanks", "bye", "ok");
-
-
-    private static final int SHORT_MESSAGE_THRESHOLD = 30;
 
     private final ChatModelCache chatModelCache;
     private final ModelRepository modelRepository;

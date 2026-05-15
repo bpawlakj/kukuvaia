@@ -80,41 +80,46 @@ func (m *Model) handleCommand(input string) (bool, tea.Cmd) {
 		return true, m.renameCurrentSession(args)
 
 	case "help":
-		helpText := `Available commands:
-  /plan <task>  — start planning mode (discovery → drafting → approval)
-  /plan status  — show current planning phase
-  /plan cancel  — cancel planning mode
-  /escalate     — route next message to advisor-tier model (one-shot)
-  /new          — start a new session
-  /session      — show current session info
-  /sessions     — browse and switch sessions (↑↓ navigate)
-  /rename <n>   — rename current session
-  /clear        — clear chat history
-  /help         — show this help
-  /quit         — exit
-
-Keybindings:
-  ctrl+p        — toggle planning mode (exit planning, or prefill /plan prompt)
-  ctrl+o        — toggle activity tracker expanded view
-  ctrl+l        — clear chat
-  ctrl+c        — quit
-  pgup/pgdn/home/end — scroll chat
-
-Planning flow: /plan <task> → answer questions → "gotowe" → review plan → "tak"
-Input box border turns yellow while planning is active.
-All other /commands are forwarded to the server.`
-		m.messages = append(m.messages, message{
-			role:   "assistant",
-			blocks: []api.OutputBlock{api.TextBlock{Content: helpText}},
-		})
-		m.viewport.SetContent(m.renderMessages())
-		m.viewport.GotoBottom()
-		return true, nil
+		// Server is authoritative for commands / tools / skills (and filters tools by the
+		// active persona — that's how named-persona mode shows extra MCP tools). The CLI then
+		// appends keybindings, which are TUI-specific and unknown to the server.
+		m.waiting = true
+		return true, m.executeHelpCommand()
 
 	default:
 		// Forward to server
 		m.waiting = true
 		return true, m.executeRemoteCommand(cmd, args)
+	}
+}
+
+// keybindingsHelpText is the TUI-specific tail appended to every server /help response.
+// Stays in CLI because the server has no business knowing how Bubbletea binds keys.
+const keybindingsHelpText = `Keybindings:
+  ctrl+p        — toggle planning mode (exit planning, or prefill /plan prompt)
+  ctrl+o        — toggle activity tracker expanded view
+  ctrl+l        — clear chat
+  ctrl+t        — toggle mouse capture (off = native terminal text selection / copy)
+  ctrl+c        — quit
+  pgup/pgdn/home/end — scroll chat
+
+Text selection: drag with shift held (Linux) / option held (macOS) works in most
+terminals while mouse capture is on. If your terminal doesn't honor that, hit
+ctrl+t to release mouse capture and select normally — toggle back to restore
+wheel scroll.
+
+Planning flow: /plan <task> → answer questions → "gotowe" → review plan → "tak"
+Input box border turns yellow while planning is active.`
+
+// executeHelpCommand fetches /help from the server (commands + persona-filtered tools + skills)
+// and appends the local keybindings tail.
+func (m Model) executeHelpCommand() tea.Cmd {
+	return func() tea.Msg {
+		blocks, err := m.client.ExecuteCommand("help", "", m.session, m.persona)
+		if err == nil {
+			blocks = append(blocks, api.TextBlock{Content: keybindingsHelpText})
+		}
+		return commandResultMsg{blocks: blocks, err: err}
 	}
 }
 
@@ -171,14 +176,14 @@ func truncateForDisplay(id string) string {
 // Uses the same streaming cmd chain as sendChat so SpanEventBlocks route to the
 // activity tracker rather than leaking into the chat history as "[unknown block]".
 func (m Model) sendPlan(task string) tea.Cmd {
-	blocks, errs := m.client.Chat(m.session, "/plan "+task)
+	blocks, errs := m.client.Chat(m.session, "/plan "+task, m.persona)
 	return readNextChatBlock(blocks, errs, nil)
 }
 
 // executeRemoteCommand sends a slash command to the server.
 func (m Model) executeRemoteCommand(cmd, args string) tea.Cmd {
 	return func() tea.Msg {
-		blocks, err := m.client.ExecuteCommand(cmd, args, m.session)
+		blocks, err := m.client.ExecuteCommand(cmd, args, m.session, m.persona)
 		return commandResultMsg{blocks: blocks, err: err}
 	}
 }
