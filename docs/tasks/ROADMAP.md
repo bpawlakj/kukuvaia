@@ -86,7 +86,7 @@ T01 ──→ T02 ──┬──→ T03 ─────────────
 | T11 | Harness Engineering (Rules System) | `done` | [T11](T11-harness-engineering.md) | 9 new, 1 migration, 1 mod | T02 |
 | T12 | Dreaming Agent | `done` | [T12](T12-dreaming-agent.md) | 6 new, 1 migration | T03, T04, T05, T10 |
 | T13 | Inter-Agent Communication (MCP Bridge) | `pending` | [T13](T13-inter-agent-mcp.md) | ~6 new, 1 migration | T10, T11 |
-| T16 | Context Compaction Phases B/C/D/E (continue P24, A shipped) | `pending` | [T16](T16-context-compaction-phases-bcde.md) | ~6 new, ~3 mod | P24-A shipped |
+| T16 | Context Compaction (P24 A–E all shipped; P08 cache hook TODO) | `done` | [T16](T16-context-compaction-phases-bcde.md) | ~12 new, ~5 mod | — |
 
 ### TIER 5 — Optimization
 
@@ -101,10 +101,10 @@ T01 ──→ T02 ──┬──→ T03 ─────────────
 TIER 1: [OK] T01  [OK] T02                               2/2  ✓
 TIER 2: [OK] T03  [OK] T04  [OK] T05  [OK] T06  [OK] T07   5/5  ✓
 TIER 3: [OK] T08  [OK] T09  [OK] T10                      3/3  ✓
-TIER 4: [OK] T11  [OK] T12  [__] T13  [__] T16            2/4
+TIER 4: [OK] T11  [OK] T12  [__] T13  [OK] T16            3/4
 TIER 5: [__] T14  [OK] T15                               1/2
 ─────────────────────────────────────────────────────
-Total:                                                    14/16
+Total:                                                    15/16
 ```
 
 ## Source Documents

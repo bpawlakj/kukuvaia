@@ -2,6 +2,7 @@ package ai.kukuvaia.config;
 
 import ai.kukuvaia.advisors.ComplexityDetector;
 import ai.kukuvaia.advisors.ContextCompactionAdvisor;
+import ai.kukuvaia.advisors.ConversationSummaryAdvisor;
 import ai.kukuvaia.advisors.LoopDetectionAdvisor;
 import ai.kukuvaia.advisors.ModelRoutingAdvisor;
 import ai.kukuvaia.advisors.SessionContextAdvisor;
@@ -60,12 +61,15 @@ class ChatClientConfigTest {
 
         var planningModeService = mock(PlanningModeService.class);
         var sessionContextAdvisor = mock(SessionContextAdvisor.class);
+        var conversationSummaryAdvisor = mock(ConversationSummaryAdvisor.class);
         var contextCompactionAdvisor = mock(ContextCompactionAdvisor.class);
         var toolCallingManager = mock(ToolCallingManager.class);
         ChatClient client = config.chatClient(builder, memory, auditLog, sanitizer,
                 memoryAdvisor, routingAdvisor, loopAdvisor, harnessAdvisor,
-                planningModeService, sessionContextAdvisor, contextCompactionAdvisor,
-                toolCallingManager, List.of());
+                planningModeService, sessionContextAdvisor, conversationSummaryAdvisor,
+                contextCompactionAdvisor, toolCallingManager, List.of());
+        // No-op: registry isn't part of the ChatClient bean signature; just ensures the
+        // build still passes once we wired the Phase C registry into the advisor.
 
         assertThat(client).isNotNull();
     }

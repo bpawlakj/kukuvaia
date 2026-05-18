@@ -1,6 +1,7 @@
 package ai.kukuvaia.config;
 
 import ai.kukuvaia.advisors.ContextCompactionAdvisor;
+import ai.kukuvaia.advisors.ConversationSummaryAdvisor;
 import ai.kukuvaia.advisors.LoopDetectionAdvisor;
 import ai.kukuvaia.advisors.ModelRoutingAdvisor;
 import ai.kukuvaia.advisors.SessionContextAdvisor;
@@ -38,8 +39,9 @@ import java.util.Collection;
  * 5. SmartMemoryAdvisor        (HIGHEST_PRECEDENCE + 5)    — inject relevant memories
  * 6. ToolResultSanitizing      (default)                   — sanitize tool outputs
  * 7. MessageChatMemoryAdvisor  (HIGHEST_PRECEDENCE + 1000) — inject conversation history
- * 8. ContextCompactionAdvisor  (HIGHEST_PRECEDENCE + 1100) — token-threshold prompt compaction (P24 Phase A)
- * 9. ToolCallAdvisor           (default)                   — multi-round tool-calling loop
+ * 8. ConversationSummaryAdvisor(HIGHEST_PRECEDENCE + 1050) — inject persisted rolling summary (P24 Phase D)
+ * 9. ContextCompactionAdvisor  (HIGHEST_PRECEDENCE + 1100) — token-threshold prompt compaction (P24 Phases A+B+D)
+ * 10.ToolCallAdvisor           (default)                   — multi-round tool-calling loop
  */
 @Configuration
 public class ChatClientConfig {
@@ -65,6 +67,7 @@ public class ChatClientConfig {
                           HarnessAdvisor harnessAdvisor,
                           PlanningModeService planningModeService,
                           SessionContextAdvisor sessionContextAdvisor,
+                          ConversationSummaryAdvisor conversationSummaryAdvisor,
                           ContextCompactionAdvisor contextCompactionAdvisor,
                           ToolCallingManager toolCallingManager,
                           Collection<ToolCallbackProvider> toolCallbackProviders) {
@@ -80,6 +83,7 @@ public class ChatClientConfig {
                         toolResultSanitizingAdvisor,
                         smartMemoryAdvisor,
                         MessageChatMemoryAdvisor.builder(chatMemory).build(),
+                        conversationSummaryAdvisor,
                         contextCompactionAdvisor,
                         ToolCallAdvisor.builder()
                                 .toolCallingManager(toolCallingManager)

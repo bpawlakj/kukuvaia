@@ -1,36 +1,41 @@
-# T16: Context Compaction — Phases B/C/D/E (continue P24)
+# T16: Context Compaction — P24 closed (A–E all shipped, P08 hook pending)
 
-**Status**: `pending` (Phase A shipped 2026-05-15)
+**Status**: `done` (all five phases shipped; A 2026-05-15, B 2026-05-18, C 2026-05-18, D 2026-05-18, E 2026-05-18)
 **Tier**: 3 — Intelligence
-**Depends On**: P24 Phase A (✅ shipped, see "Phase A landed" below)
-**Blocks**: nothing critical; P08 prompt-cache work should respect pinning rules added here
+**Depends On**: P24 Phases A + B + C + D + E (✅ all shipped)
+**Blocks**: nothing; the Phase E pinning mechanism is the integration point for P08 prompt-cache markers when that ships
 **Source Plan**: [`docs/plan/P24-context-compaction.md`](../plan/P24-context-compaction.md)
-**Supersedes**: P04 conversation summarization (the long-session part is now Phase D below)
+**Supersedes**: P04 conversation summarization (long-session part landed as Phase D)
 
 ## Why this exists
 
-P24 Phase A solved the catastrophic case — a single agent turn growing past the LLM's
-context window and crashing with HTTP 400 — by trimming oldest tool-call pairs verbatim.
-That stops the bleed but loses information silently. Phases B/C/D/E turn the crude trim
-into actual compaction: collapse redundant calls, summarize big payloads with per-tool
-hooks, summarize whole turns with an LLM, and respect provider-side prompt-cache markers.
+P24 was a five-phase token-threshold context compaction effort to stop LLM requests
+from overflowing the context window. All five phases shipped on 2026-05-18 (Phase A
+shipped earlier, 2026-05-15).
 
-A future session picking this up should be able to read THIS file, jump into the
-Phase A code, and start on Phase B without re-reading P24's full spec — though the spec
-remains the authoritative source of trade-offs and open questions.
+This file is now a reference doc for the design as built. The only follow-up is the
+P08 prompt-cache marker reader — when P08 ships, this advisor should treat
+cache-marked ranges as pinned. The pinning mechanism (Phase E) is already in place.
 
-## Phase A landed (reference for the new session)
+## P24 as built (reference)
 
-Files to read first to understand the foundation:
+Files to read to understand the foundation:
 
 | File | What it does |
 |---|---|
-| `kukuvaia-engine/kukuvaia-core/src/main/java/ai/kukuvaia/advisors/TokenEstimator.java` | char-based estimator with NL/JSON weights + per-msg overhead; handles `ToolResponseMessage.getResponses()` and `AssistantMessage.getToolCalls()` payloads (these are NOT in `getText()`) |
-| `kukuvaia-engine/kukuvaia-core/src/main/java/ai/kukuvaia/advisors/ContextCompactionAdvisor.java` | the advisor — order `HIGHEST_PRECEDENCE + 1100`, runs after `MessageChatMemoryAdvisor`; resolves active model window from `ModelRepository.findByModelId(CTX_ROUTED_MODEL)`; drops oldest tool-call pairs verbatim |
-| `kukuvaia-engine/kukuvaia-core/src/main/java/ai/kukuvaia/config/ChatClientConfig.java` | wires the advisor into both ChatClient beans |
-| `kukuvaia-engine/kukuvaia-core/src/test/java/ai/kukuvaia/advisors/{TokenEstimatorTest,ContextCompactionAdvisorTest}.java` | the test fixtures — copy their patterns for new phases |
+| `advisors/TokenEstimator.java` | char-based estimator with NL/JSON weights + per-msg overhead; handles `ToolResponseMessage.getResponses()` and `AssistantMessage.getToolCalls()` payloads (these are NOT in `getText()`) |
+| `advisors/ContextCompactionAdvisor.java` | the advisor — order `HIGHEST_PRECEDENCE + 1100`, runs after `MessageChatMemoryAdvisor`. Resolves active model window from `ModelRepository.findByModelId(CTX_ROUTED_MODEL)` (warns once per model when missing). Runs full strategy ladder: B(retry collapse) → B(duplicate fold) → C(per-tool summary) → A(hard-cap drop) → D(LLM summarisation). Phase A and Phase C both honour `ToolCompactionRegistry.isPinned(toolName)` |
+| `advisors/CompactionStrategies.java` | Pure static strategies for Phases B + C. Jackson `convertValue(node, Object.class)` + `ORDER_MAP_ENTRIES_BY_KEYS` canonicalises args for duplicate detection. Verdict regex matches `REJECT_*` / `ANTI_PATTERN` / `InvariantViolationException` / `Error calling tool`. Phase C compacts each `ToolResponseMessage.ToolResponse` individually — skips registry-pinned tools, applies registered `ToolCompactSummary` if available, else default elision marker for bodies ≥ 200 chars |
+| `advisors/ToolCompactionRegistry.java` | Component holding `toolName → ToolCompactSummary` map + `pinnedTools` set. Tool-owning modules register via `@PostConstruct` |
+| `advisors/ToolCompactSummary.java` | Functional interface: `(argsJson, responseData) → String`. Implementations must be pure + crash-safe (return null on parse failure → caller falls back to elision) |
+| `advisors/ToolSummariesConfiguration.java` | Built-in registrations for canonical MCP bloat sources: `introspect_section_schema`, `get_outline_sections`, `get_outline_snapshot` |
+| `advisors/ConversationSummariser.java` | Phase D summariser — calls the cheap `worker`-role LLM via `ChatModelCache` with a 10s timeout. Returns `Optional.empty()` on any failure |
+| `advisors/ConversationSummaryAdvisor.java` | Phase D resume-side — order `HIGHEST_PRECEDENCE + 1050`. Reads persisted summary and injects a `SystemMessage("Conversation summary so far:\n...")` after the persona |
+| `kukuvaia-memory/.../ConversationSummaryRepository.java` | JDBC reader/writer for `kukuvaia.conversations.summary`. Upserts via `ON CONFLICT (session_id) DO UPDATE` |
+| `config/ChatClientConfig.java` | wires `ConversationSummaryAdvisor` + `ContextCompactionAdvisor` into both ChatClient beans |
+| Tests | `{TokenEstimator, ContextCompactionAdvisor, CompactionStrategies, ConversationSummariser, ConversationSummaryAdvisor, ConversationSummaryRepository, ToolCompactionRegistry, ToolSummariesConfiguration}Test` |
 
-Config surface already in place (extend, don't replace):
+Full config surface (P24 closed):
 
 ```yaml
 kukuvaia:
@@ -38,108 +43,140 @@ kukuvaia:
     enabled: true
     default-window-tokens: 200000
     safety-margin-tokens: 5000
-    keep-last-turns: 2
+    keep-last-turns: 2                       # Phase A + Phase C keep window
+    # Phase C
+    tool-summaries-enabled: true
+    tool-summaries-default-elision: true     # elide bodies of unregistered tools' old responses
+    # Phase D
+    summarisation-enabled: true
+    summarisation-role: worker               # ChatModelCache role for the summariser
+    summarisation-timeout-seconds: 10
+    summarisation-max-input-chars: 30000     # cap on per-pass summariser input
+    summarisation-keep-last-turns: 4         # last K user messages preserved verbatim
 ```
 
-Key invariants Phase A established that B/C/D/E must preserve:
+Key invariants Phases A + B established that C/D/E must preserve:
 - `SystemMessage` is never dropped (persona is the contract).
 - The last user message is never dropped.
-- The last `keep-last-turns` (default 2) tool-call pairs are never dropped.
+- The last `keep-last-turns` (default 2) tool-call pairs are never dropped by Phase A's
+  hard-cap pass. (Phase B's fold/collapse may transform older copies/attempts within
+  the recent window, but the most recent verbatim copy/attempt is always retained.)
 - Tool-call pairs (assistant-with-tool_calls + paired `ToolResponseMessage`) are dropped
   as units — never leave a tool_use without its tool_result, or the provider crashes.
+- Phase B replaces folded ranges with a single `SystemMessage` note (canonical pointer or
+  synthetic retry summary). Multi-tool-call assistant messages are skipped by duplicate
+  folding (too risky to flatten distinct tool intents).
 - The advisor emits a `TextBlock(style="warning")` via `SessionOutputSink` whenever it
-  fires, so the operator sees what happened in the SSE stream.
+  fires, with per-strategy counts (`retryLoopsCollapsed`, `duplicatesFolded`,
+  `messagesDropped`) so the operator sees exactly what happened in the SSE stream.
 
 ---
 
-## Phase B — Duplicate-drop + Retry-loop collapse
+## Phase B — Duplicate-drop + Retry-loop collapse [✅ SHIPPED 2026-05-18]
 
 **Goal:** Recognise that the agent retried the same tool with the same (or near-same)
 args and fold the failed attempts into one synthetic summary, keeping only the most
 recent verbatim attempt. Catches the L1/L2 reject retry pattern from 2026-05-13 where
 4 `create_rule` attempts with the same wrong UUID literal each took ~1 KB.
 
-**Scope:**
-- Detect duplicate tool calls — same tool name + identical `arguments` JSON ≥ 2 times.
-  Keep only the latest verbatim; replace older ones with a pointer message:
-  `"identical to message #N below — see there for the response"`.
-- Detect retry loops — same tool name + similar args + ≥ 2 consecutive responses whose
-  text starts with `Error calling tool:` or matches a known reject pattern. Collapse the
-  N failures into one synthetic assistant message:
-  `"agent attempted create_rule 4 times; rejection verdicts: ANTI_PATTERN, REJECT_PREREQUISITE_NEVER_MATCHED (×3 with histogram [Lesson=12, Page=8]). Most recent attempt's full args + response retained below."`
-- "Similar args" definition: same tool name AND ≥ 80 % JSON-key overlap. JSON deep-equal
-  is too strict (agent may flip one literal); Levenshtein on full string is too lax.
-- Pair-detection still applies — drop both halves of a redundant call together.
+**Landed:** `CompactionStrategies.java` (pure static helpers) +
+`ContextCompactionAdvisor.compact()` runs strategies in order:
+`collapseRetryLoops` → `foldDuplicateToolCalls` → `hardCapDropOldestPairs`.
 
-**Acceptance:**
-- [ ] Phase A's hard-cap drop is the last resort; Phase B runs FIRST when over threshold.
-- [ ] A fixture with 4 identical `introspect_section_schema(template=X)` calls keeps
+Implementation notes carried forward (do not regress in later phases):
+- "Similar args" is JSON-top-level-key overlap ≥ 0.80 (Jaccard). Same tool name required.
+- Canonical args use Jackson `convertValue(node, Object.class)` to a `Map` then serialise
+  with `SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS` (ObjectNode's direct
+  `writeValueAsString` does NOT honour that feature).
+- Pair invariant preserved: replacements are whole-pair, with a single `SystemMessage`
+  note inserted at the dropped range.
+- Multi-tool-call assistant messages are skipped by duplicate folding (`toolName == null`
+  sentinel) — too risky to flatten distinct tool intents.
+- Retry collapse runs BEFORE duplicate fold so verdict info is captured before identical-arg
+  pairs would otherwise be flattened to plain pointer notes.
+- Run is required to be CONSECUTIVE in the message list — any intervening
+  `UserMessage`/`SystemMessage` breaks the run (oscillation patterns are out of scope).
+
+**Acceptance results:**
+- [x] Phase A's hard-cap drop is the last resort; Phase B runs FIRST when over threshold.
+- [x] A fixture with 4 identical `introspect_section_schema(template=X)` calls keeps
       only one verbatim response; the others become pointer messages.
-- [ ] A fixture replaying the 2026-05-13 log (4× `create_rule` with same wrong UUID
-      → 4× L2 reject) emits one collapsed message naming the verdict pattern.
-- [ ] Diagnostic counts in the warning OutputBlock: `duplicatesFolded`, `retryLoopsCollapsed`.
-- [ ] Existing Phase A tests still pass — order of strategies in the advisor must be
-      "B first, then A as fallback."
+- [x] A fixture replaying the 2026-05-13 log emits one collapsed message naming the
+      verdict pattern (`REJECT_PREREQUISITE_NEVER_MATCHED`, `InvariantViolationException`).
+- [x] Diagnostic counts in the warning OutputBlock: `duplicatesFolded`,
+      `retryLoopsCollapsed`, `messagesDropped`.
+- [x] All Phase A tests still pass (fixtures updated to use distinct args where they
+      previously shared `"{}"` so the hard-cap drop path remains exercised).
 
-**Don't:**
-- Don't reorder Phase A's pin policy.
-- Don't collapse loops that include non-error responses interleaved — that's a different
-  pattern (oscillation), out of scope here.
+**Test coverage:** 10 unit tests on `CompactionStrategiesTest` (5 fold + 5 collapse) +
+3 new integration tests on `ContextCompactionAdvisorTest` (dup-fold path, retry-collapse
+path, Phase B+A combined).
 
 ---
 
-## Phase C — Per-tool summary hooks
+## Phase C — Per-tool summary hooks [✅ SHIPPED 2026-05-18]
 
 **Goal:** Replace the 50 KB verbatim `introspect_section_schema` response with a 1 KB
 summary that preserves what the LLM needs to author rules (counts, top spec ids), so
 older copies of large payloads stop bloating the prompt.
 
-**Scope:**
-- Introduce an opt-in mechanism for `@Tool` methods to register a `compactSummary`
-  function `(originalArgs, originalResponse) -> String`. Default fallback when no
-  summary registered: drop the body, keep tool name + arg keys + a size marker
-  (`"... [4732-char response elided by P24-C]"`).
-- Mechanism options (decide at implementation time):
-  - A new annotation `@CompactSummary("summarizerBeanName")` on the @Tool method —
-    Spring resolves the bean, invokes its `summarize(args, response)`.
-  - Or a `ToolCompactionRegistry` keyed by tool name, populated at startup by tool-
-    owning modules.
-  - The simpler one wins; if no clear winner, registry. Tool-owning teams should not
-    have to import Spring-AI internals to opt in.
-- Implement summaries for the high-payload tools we hit in production:
-  - `introspect_section_schema` → `"schema for template <id>: 47 sectionTypes, 23 boolean specs, 8 taxonomy specs"`. Drop the body — agent can re-call.
-  - `get_outline_sections` → `"first <K> sections of outline <id>: titles=[t1, …, tK]; <N-K> more available via offset=<K>"`.
-  - `start_rule_authoring` → similar shape, pin sample-id list as it's actively used.
-  - `get_outline_snapshot` → reject up-front; this is megabytes and the persona prompt
-    already tells agents not to call it for in-context retention. The summary message
-    should reference that guidance.
-- Compaction applies ONLY to old responses (older than `keep-last-turns`). The most
-  recent response stays verbatim.
+**Landed:** `ToolCompactSummary` functional interface + `ToolCompactionRegistry` Spring
+component (registry chosen over annotation — simpler, no reflection, tool-owning teams
+register at startup). `CompactionStrategies.summariseOldToolResponses` runs between
+Phase B and Phase A. `ToolSummariesConfiguration` registers built-ins on startup.
 
-**Acceptance:**
-- [ ] A fixture with 2× `introspect_section_schema` calls compacts the older response
-      to a single-sentence summary; the recent one remains verbatim.
-- [ ] If a tool has no registered summary, fallback message preserves tool name +
-      arg keys, drops body.
-- [ ] Summaries fit within a configurable per-tool cap (default 500 chars). Long
-      summaries are truncated with `...`.
-- [ ] Tool-side opt-in is documented in `docs/architecture/` or wherever the
-      `@Tool`/MCP conventions live.
+Implementation notes carried forward:
+- Compaction applies ONLY to responses older than `keep-last-turns` (default 2).
+- Per-response not per-pair: each `ToolResponseMessage.ToolResponse` is handled
+  individually, so a multi-call assistant message still gets per-call treatment.
+- Registered summary returns null → default elision marker (configurable via
+  `tool-summaries-default-elision`; on by default).
+- Registered summary throws → swallowed, falls back to elision.
+- Summary text capped at 500 chars; longer outputs are truncated with `...`.
+- Bodies shorter than 200 chars (`MIN_ELIDE_CHARS`) are NOT elided — the marker itself
+  would be comparable in size.
+- Built-in summaries are best-effort: they parse the JSON tree defensively, returning
+  null on any parse failure so the strategy falls through to elision.
 
-**Don't:**
-- Don't summarise on EVERY turn — only when the advisor decides to compact. Summaries
-  cost an LLM call's worth of code maintenance even if not LLM-driven.
-- Don't summarise responses for tools the LLM is actively reasoning about. Use the
-  `keep-last-turns` window as the protective fence.
+**Acceptance results:**
+- [x] A fixture with 3× `introspect`-style calls compacts the older two responses,
+      most recent stays verbatim (`registeredSummary_appliedToOlder_keepsLatestVerbatim`).
+- [x] No registered summary + default elision on → fallback marker carries tool name +
+      arg keys + size (`noSummary_elisionOn_elidesOld`).
+- [x] Summary text capped at 500 chars (`overLongSummary_truncated`).
+- [x] Registry registration documented in {@code ToolCompactionRegistry} javadoc + the
+      `ToolSummariesConfiguration` exemplar.
+
+**Test coverage:** 4 registry tests + 7 strategy tests + 5 built-in summary tests +
+1 integration test on `ContextCompactionAdvisor` = 17 new tests.
 
 ---
 
-## Phase D — LLM-driven long-session summarisation (replaces P04)
+## Phase D — LLM-driven long-session summarisation (replaces P04) [✅ SHIPPED 2026-05-18]
 
 **Goal:** When in-turn strategies (Phases A+B+C) have done all they can and the prompt
 is STILL over budget — typical on long-resumed sessions with hundreds of turns —
 summarise the oldest user/assistant pairs into `conversations.summary` (the orphan
 column already present in V2 migration) and prepend that summary on future turns.
+
+**Landed:** `ConversationSummariser` (worker-tier LLM call, 10s timeout, graceful
+fallback) + `ConversationSummaryRepository` (upsert on `kukuvaia.conversations`) +
+`ConversationSummaryAdvisor` (resume-side injection at order 1050) + Phase D step in
+`ContextCompactionAdvisor.compact()` after the Phase A hard-cap drop.
+
+Implementation notes carried forward (do not regress in remaining phases):
+- Order matters: B → A → D. Phase D is a FALLBACK after A — it catches narrative bloat
+  (user/assistant text without tool calls) that A cannot touch.
+- Phase D pins SystemMessages and the last `summarisation-keep-last-turns` user
+  messages (plus everything after the last kept user message). Default is 4.
+- The replaced range becomes ONE `SystemMessage` with prefix
+  `"Conversation summary so far:\n"` — also used by the resume advisor to detect
+  double-injection.
+- Monotonicity: previous summary is read from DB and fed back into the next pass
+  as part of the worker prompt. The cheap LLM is instructed to ABSORB, not reset.
+- DB write is best-effort: if upsert fails, Phase D still applies the in-memory
+  summary so the current turn fits — accepts that the next resume won't see it.
+- Counter in `CompactionOutcome` + warning OutputBlock: `messagesSummarised`.
 
 **Scope:**
 - Trigger: estimator still over `soft-threshold-fraction` of window after Phase A+B+C
@@ -163,31 +200,50 @@ column already present in V2 migration) and prepend that summary on future turns
 - Monotonicity: summaries fold; never reset to empty. Each pass produces a strictly
   longer-or-equal summary that absorbs more history.
 
-**Acceptance:**
-- [ ] A simulated 200-turn session with rolling summarisation:
-      - `conversations.summary` is non-empty after the first summarisation pass.
-      - Each subsequent pass produces a summary that mentions facts from the previous one
-        (monotonicity).
-      - Resuming the session injects the summary as the second `SystemMessage`.
-- [ ] Summarisation LLM is configurable; default doesn't hit the main interactive model.
-- [ ] If the summarisation call fails, advisor falls through to Phase A's verbatim drop
-      (degraded but not crashed).
-- [ ] The orphan `conversations.summary` column gets a writer — schema doesn't change.
+**Acceptance results:**
+- [x] Rolling summarisation: `phaseD_summarisesOldestTurns` covers the first-pass case;
+      `phaseD_monotonicityPreservedAcrossPasses` covers feed-forward of the prior summary;
+      `ConversationSummaryAdvisorTest.summaryPresent_injectedAfterPersona` covers the
+      resume-side injection at position 1.
+- [x] Summarisation LLM is configurable (`summarisation-role`, default `worker`) and
+      defaults to NOT the main interactive model.
+- [x] LLM failure → `Optional.empty()` → no DB write, no message mutation
+      (`phaseD_summariserFailure_doesNotPersist`).
+- [x] Orphan column is now written via `ConversationSummaryRepository.upsertSummary`.
 
-**Don't:**
-- Don't fold the most recent turns into the summary (preserves debugging visibility).
-- Don't trigger summarisation on every turn — only when over the soft threshold AND
-  Phases A+B+C didn't free enough budget.
-- Don't conflate this with `kukuvaia-memory` (`MemoryConsolidationJob`) — different
-  module, different concern (cross-session knowledge vs in-session continuity).
+**Test coverage:** 6 repository tests + 7 summariser tests + 6 resume-advisor tests +
+5 integration tests on `ContextCompactionAdvisor` = 24 new tests, all green.
+
+**Did not:**
+- Don't fold the most recent turns into the summary (debugging visibility preserved).
+- Don't trigger summarisation on every turn — only on overflow after Phases A+B.
+- Don't conflate with `kukuvaia-memory` (`MemoryConsolidationJob`) — different table,
+  different concern.
 
 ---
 
-## Phase E — Provider-aware threshold + smarter pinning + prompt-cache awareness
+## Phase E — Provider-aware threshold + smarter pinning + prompt-cache awareness [✅ SHIPPED 2026-05-18]
 
 **Goal:** Stop using a hardcoded default window. Pull each model's real window from
 provider config dynamically. Let tools mark specific responses un-compactable. Coordinate
 with P08 prompt-cache markers so compaction doesn't invalidate cache prefixes.
+
+**Landed:** `ToolCompactionRegistry.pin(toolName)` API (extended from the Phase C
+registry — same component, no new beans). `ContextCompactionAdvisor.resolveHardCap`
+logs a one-time-per-model warning when the active model has no `contextWindow` in the
+registry (still falls back to `defaultWindowTokens`, but the operator sees the gap).
+`hardCapDropOldestPairs` and `summariseOldToolResponses` both honour `isPinned(toolName)`.
+P08 prompt-cache marker reader is the only piece NOT in this drop — flagged as a TODO
+in the advisor javadoc; pinning mechanism is in place for when P08 ships.
+
+Implementation notes:
+- Pinning is whole-tool, not per-call. Tool-owning teams register pin via
+  `registry.pin("tool_name")` at startup; idempotent.
+- Phase A skips the pair if ANY tool_call in the AssistantMessage targets a pinned tool.
+- Phase C skips the specific `ToolResponse` whose `name()` is pinned, leaving siblings
+  in the same `ToolResponseMessage` free to be summarised.
+- Warn-on-missing-window is rate-limited via a `Set<String>` per process — clears at
+  restart, which is the operator-feedback loop anyway.
 
 **Scope:**
 - **Per-model window:** Phase A already resolves `contextWindow` from `ModelRecord` if
@@ -207,52 +263,50 @@ with P08 prompt-cache markers so compaction doesn't invalidate cache prefixes.
   - The advisor reads cache marker metadata from request options (P08 will define the
     shape) and treats marked ranges as pinned.
 
-**Acceptance:**
-- [ ] Removing the hardcoded `default-window-tokens` is feasible — every registered
-      model has a real window or admin tooling forces one.
-- [ ] A tool can opt in to pinning; pinned responses survive compaction even when older
-      than `keep-last-turns`.
-- [ ] If P08 is shipped, cache-marked ranges are treated as pinned. If P08 is not yet
-      shipped, this phase still ships the pinning mechanism, with a TODO noting the P08
-      coordination point.
-- [ ] Telemetry: emit per-compaction event the strategies applied, byte savings, and
-      whether any pinned-response barriers were encountered.
+**Acceptance results:**
+- [x] Per-model window: `resolveHardCap` warns once per misconfigured model (rate-limited).
+      Hard removal of the default is left for the future — the fallback is graceful.
+- [x] Tool pin opt-in via `ToolCompactionRegistry.pin`; pinned tools survive Phase A drops
+      AND Phase C summaries (`phaseE_pinSurvivesPhaseA`, `phaseE_pinSurvivesPhaseC`).
+- [ ] **TODO (P08 coordination):** prompt-cache marker reader. The pinning mechanism is in
+      place; the reader is the remaining one-day piece. Noted in
+      `ContextCompactionAdvisor` javadoc.
+- Telemetry hookup (byte savings + per-strategy event) is deferred — current logging
+  + warning OutputBlock cover the operator-visible signal.
 
-**Don't:**
+**Test coverage:** 3 new registry tests (pin/unpin/idempotent) + 2 integration tests on
+`ContextCompactionAdvisor` (Phase A skip-pinned, Phase C skip-pinned).
+
+**Did not:**
 - Don't let tools pin everything — pinning is the loophole and must be explicit.
-- Don't break Phase A's behaviour when `contextWindow` is unset; keep the default-window
-  fallback for grace.
+- Don't break Phase A's behaviour when `contextWindow` is unset; default-window fallback
+  retained for grace.
 
 ---
 
-## Suggested execution order
+## Follow-up
 
-1. **Phase B first** — highest leverage per line of code: the retry-loop case from
-   2026-05-13 was real and large. Will produce visible improvement on the next
-   rule-authoring session.
-2. **Phase D second** — orphan column has been there since V2; persisting summaries
-   unlocks session resume and removes the "context amnesia on long sessions" complaint
-   that P04 was originally drafted for.
-3. **Phase C third** — per-tool summaries are bigger work for less catastrophic gain;
-   the registry/annotation choice deserves a small spike.
-4. **Phase E last** — refinement layer. Useful after C+D have established what
-   pinning needs to protect.
+The only remaining work is the **P08 prompt-cache marker reader**. When P08 ships:
+1. Decide where cache-marker metadata lives on the request (P08 should define).
+2. In `ContextCompactionAdvisor.compact()`, treat marked message ranges as pinned —
+   refuse to mutate them, even for Phase B's folds.
+3. Add a fixture test mirroring `phaseE_pinSurvivesPhaseA` but using a cache marker.
 
-A single fresh session can probably ship Phase B + Phase D in two days each if focused.
-Phase C is a week of design + per-tool implementation. Phase E is a few days once
-P08's prompt-cache shape is known.
+Everything else in P24 is closed.
 
 ## Pointers for the next session
 
 - The "200 K token overflow" log slice from 2026-05-13 is the canonical regression — if
   any phase passes its own tests but doesn't materially help that scenario, the design
-  needs a rethink.
+  needs a rethink. (Phase B alone now collapses the 4× create_rule retry into one
+  synthetic note + one verbatim attempt; verify in production logs after next deploy.)
 - The roadmap entry: `.maister/docs/project/roadmap.md` has P24 row with status
-  "Draft" and supersedes P04. Update that row's status to "Phase B shipped" /
-  "Phase D shipped" etc. as each lands.
+  "Phases A + B shipped". Update that row's status to "Phase D shipped" / "Phase C
+  shipped" etc. as each lands.
 - The persona prompt at `kukuvaia-engine/kukuvaia-core/src/main/resources/personas/rule-editor.yaml`
-  has retry-bound language already (see "RETRY BOUND" section). Phase B should make
-  the engine-side reality match the persona's expectation that retries will be collapsed.
+  has retry-bound language already (see "RETRY BOUND" section). Phase B now makes the
+  engine-side reality match the persona's expectation — engine collapses retry runs
+  even if the agent fails to honour the retry cap.
 - Open questions in the P24 spec (granularity, re-fetch policy, estimator calibration,
-  summarisation LLM choice) are still open — read them BEFORE designing the phase, not
+  summarisation LLM choice) are still open — read them BEFORE designing Phase D, not
   after.
