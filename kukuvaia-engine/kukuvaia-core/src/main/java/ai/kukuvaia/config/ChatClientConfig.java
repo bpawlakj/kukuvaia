@@ -14,6 +14,8 @@ import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
 import ai.kukuvaia.tools.DelegationTools;
 import ai.kukuvaia.tools.MemoryTools;
 import ai.kukuvaia.tools.PlanningTools;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
@@ -45,6 +47,8 @@ import java.util.Collection;
  */
 @Configuration
 public class ChatClientConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(ChatClientConfig.class);
 
     @Bean
     ToolCallbackProvider javaToolCallbackProvider(MemoryTools memoryTools, PlanningTools planningTools,
@@ -90,22 +94,42 @@ public class ChatClientConfig {
                                 .build()
                 );
 
-        // Register all @Tool methods as default tools. Each callback is wrapped with the MCP
-        // error translator — the wrapper is a pass-through for tools that cannot fail with the
-        // recognised SSE-session pattern (kukuvaia-internal @Tool methods, etc.) and cheap to
-        // apply uniformly. For MCP-backed tools the wrapper turns "Session not found" 404 stack
-        // traces into a one-paragraph instruction the LLM can forward to the operator, so the
-        // model does not halucynować a wrong cause when the validation-engine peer restarts.
+        registerCallbacksDefensively(clientBuilder, toolCallbackProviders);
+        return clientBuilder.build();
+    }
+
+    /**
+     * Register all @Tool methods as default tools, wrapping each callback with the MCP error
+     * translator and crucially tolerating per-provider failures: if one MCP peer is unreachable
+     * and its {@code getToolCallbacks()} call times out / throws, that provider's tools are
+     * skipped with a WARN, but startup continues with the remaining providers' tools. Without
+     * this, an unreachable peer would tear down the whole {@link ChatClient} bean (Spring AI's
+     * {@code SyncMcpToolCallbackProvider.getToolCallbacks} calls {@code listTools()} on every
+     * registered client and blocks/throws for the slowest one).
+     *
+     * <p>The {@link McpErrorTranslatingToolCallback} wrapper is a pass-through for in-process
+     * tools and rewrites SSE "Session not found" 404 traces from MCP-backed tools into a
+     * one-paragraph operator-facing message — the LLM doesn't get a chance to hallucinate the
+     * cause when the peer restarts.
+     */
+    private static void registerCallbacksDefensively(ChatClient.Builder clientBuilder,
+                                                     Collection<ToolCallbackProvider> toolCallbackProviders) {
         for (ToolCallbackProvider provider : toolCallbackProviders) {
-            ToolCallback[] callbacks = provider.getToolCallbacks();
+            ToolCallback[] callbacks;
+            try {
+                callbacks = provider.getToolCallbacks();
+            } catch (Exception e) {
+                log.warn("ToolCallbackProvider '{}' failed to list tools — skipping its tools "
+                                + "for this process. Cause: {}",
+                        provider.getClass().getSimpleName(), e.getMessage());
+                continue;
+            }
             ToolCallback[] wrapped = new ToolCallback[callbacks.length];
             for (int i = 0; i < callbacks.length; i++) {
                 wrapped[i] = new McpErrorTranslatingToolCallback(callbacks[i]);
             }
             clientBuilder.defaultToolCallbacks(wrapped);
         }
-
-        return clientBuilder.build();
     }
 
     /**
@@ -143,15 +167,7 @@ public class ChatClientConfig {
                                 .build()
                 );
 
-        for (ToolCallbackProvider provider : toolCallbackProviders) {
-            ToolCallback[] callbacks = provider.getToolCallbacks();
-            ToolCallback[] wrapped = new ToolCallback[callbacks.length];
-            for (int i = 0; i < callbacks.length; i++) {
-                wrapped[i] = new McpErrorTranslatingToolCallback(callbacks[i]);
-            }
-            clientBuilder.defaultToolCallbacks(wrapped);
-        }
-
+        registerCallbacksDefensively(clientBuilder, toolCallbackProviders);
         return clientBuilder.build();
     }
 }

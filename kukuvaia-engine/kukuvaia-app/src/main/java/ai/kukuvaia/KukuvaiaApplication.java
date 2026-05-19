@@ -4,15 +4,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.security.Security;
+import ai.kukuvaia.mcp.McpReactorErrorHandling;
 import ai.kukuvaia.provider.copilot.CopilotTokenProvider;
 
 @EnableScheduling
 @SpringBootApplication(excludeName = {
-        "org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration"
+        "org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration",
+        // kukuvaia is an MCP CLIENT only — it does NOT re-expose its tools as an MCP server.
+        // The aggregator below builds a List<SyncToolSpecification> by calling listTools()
+        // on every registered MCP client; an unreachable client (e.g. the validation-engine
+        // peer down during startup) makes that aggregator throw, which then tears down the
+        // whole ApplicationContext. We don't use the bean, so we drop the autoconfig.
+        "org.springframework.ai.mcp.server.common.autoconfigure.ToolCallbackConverterAutoConfiguration",
+        "org.springframework.ai.mcp.server.common.autoconfigure.StatelessToolCallbackConverterAutoConfiguration"
 })
 @ComponentScan(basePackages = {"ai.kukuvaia", "com.embabel"})
 public class KukuvaiaApplication {
@@ -31,7 +41,16 @@ public class KukuvaiaApplication {
 
     public static void main(String[] args) {
         configureDnsCacheTtl();
-        SpringApplication.run(KukuvaiaApplication.class, args);
+        // Install BEFORE SpringApplication.run — the reactor onErrorDropped hook is global
+        // (survives Spring Boot's logging-system reset), but the Logback TurboFilter does
+        // NOT survive that reset. The listener below re-installs the filter once Spring
+        // Boot has rebuilt the LoggerContext (during ApplicationEnvironmentPreparedEvent),
+        // which fires after Logback config but before any MCP transport opens.
+        McpReactorErrorHandling.install();
+        SpringApplication application = new SpringApplication(KukuvaiaApplication.class);
+        application.addListeners((ApplicationListener<ApplicationEnvironmentPreparedEvent>) event ->
+                McpReactorErrorHandling.installSseNoiseFilter());
+        application.run(args);
     }
 
     static void configureDnsCacheTtl() {

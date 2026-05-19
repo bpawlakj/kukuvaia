@@ -29,7 +29,20 @@ public class ToolRegistryConfig {
 
     public ToolRegistryConfig(Collection<ToolCallbackProvider> providers) {
         for (ToolCallbackProvider provider : providers) {
-            for (ToolCallback callback : provider.getToolCallbacks()) {
+            ToolCallback[] callbacks;
+            try {
+                // Defensive: a provider that talks to an unreachable MCP peer will throw
+                // (or time out after 20s) on getToolCallbacks() — historically that took
+                // down the whole context. Skip the failing provider with a WARN so the
+                // tool registry still initialises with everything reachable.
+                callbacks = provider.getToolCallbacks();
+            } catch (Exception e) {
+                log.warn("ToolCallbackProvider '{}' failed to list tools — its tools "
+                                + "will not be registered for this process. Cause: {}",
+                        provider.getClass().getSimpleName(), e.getMessage());
+                continue;
+            }
+            for (ToolCallback callback : callbacks) {
                 // Wrap every registered callback with the MCP error translator. The wrapper is a
                 // pure pass-through for non-MCP tools (no transport failure shape matches), so it
                 // is cheap to apply uniformly. For MCP-backed tools it converts cryptic 100-line
