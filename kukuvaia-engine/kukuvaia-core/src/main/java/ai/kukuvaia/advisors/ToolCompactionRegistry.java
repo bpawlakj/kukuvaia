@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 /**
  * Registry of per-tool response summaries used by P24 Phase C. Tool-owning modules
  * (or their Spring {@code @Configuration} beans) register a {@link ToolCompactSummary}
- * keyed by the tool name as the LLM/MCP sees it — e.g. {@code "introspect_section_schema"}.
+ * keyed by the tool name as the LLM/MCP sees it.
  *
  * <p>Why a registry instead of an annotation: tool implementations may live in another
  * JVM (MCP servers) where the engine has no reflection access; the tool name string is
@@ -32,7 +32,7 @@ public class ToolCompactionRegistry {
      * Tools whose responses must NOT be compacted (P24 Phase E pinning). A pinned tool's
      * responses survive Phase A drops and Phase C summaries even when older than the
      * keep window — useful when the in-flight workflow depends on raw response data
-     * (e.g. sample section UUIDs the rule-editor is actively referencing).
+     * (e.g. sampled IDs the active persona is referencing across turns).
      */
     private final Set<String> pinnedTools = ConcurrentHashMap.newKeySet();
 

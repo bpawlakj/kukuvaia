@@ -108,43 +108,41 @@ class McpConnectionsCacheTest {
     }
 
     /**
-     * TG2.C — validation-engine MCP connection contract. The persona implementations in
-     * TG2.A / TG2.B address an MCP connection registered under the name "validation-engine".
-     * These tests pin the contract: when an operator inserts the row from
-     * scripts/register-validation-engine-mcp.sql, the cache exposes the connection under
-     * that name, the URL prefix lookup routes to it, and the Authorization header carries
-     * the env-var reference (so the token never sits in a DB row).
+     * Round-trip contract: when an operator inserts an MCP connection row, the cache must
+     * expose the connection under its registered name, longest-prefix URL lookup must route
+     * matching outbound requests back to it, and the Authorization header must carry the
+     * env-var reference so the token never sits in a DB row.
      */
     @org.junit.jupiter.api.Nested
-    @DisplayName("TG2.C — validation-engine MCP connection contract")
-    class ValidationEngineConnection {
+    @DisplayName("MCP connection round-trip contract")
+    class ConnectionRoundTrip {
 
-        private static final String CONNECTION_NAME = "validation-engine";
+        private static final String CONNECTION_NAME = "test-mcp";
         private static final String DEFAULT_URL = "http://localhost:8081/mcp";
 
         @Test
-        @DisplayName("validation-engine row is exposed under name 'validation-engine' with env-ref Authorization header")
-        void validationEngineRow_isResolvedByName() {
+        @DisplayName("connection row is exposed under its name with env-ref Authorization header")
+        void connectionRow_isResolvedByName() {
             McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
             when(repo.findAllEnabled()).thenReturn(List.of(
                     conn(CONNECTION_NAME, DEFAULT_URL,
-                            Map.of("Authorization", "env:VALIDATION_ENGINE_TOKEN"))
+                            Map.of("Authorization", "env:TEST_MCP_TOKEN"))
             ));
 
             McpConnectionsCache cache = new McpConnectionsCache(repo);
 
             assertThat(cache.all())
-                    .as("the validation-engine row must round-trip through the cache exactly once")
+                    .as("the connection row must round-trip through the cache exactly once")
                     .extracting(McpConnection::name)
                     .containsExactly(CONNECTION_NAME);
             assertThat(cache.headersFor(CONNECTION_NAME))
-                    .as("token must be an env reference, never a literal — see scripts/register-validation-engine-mcp.sql")
-                    .containsEntry("Authorization", "env:VALIDATION_ENGINE_TOKEN");
+                    .as("token must be an env reference, never a literal")
+                    .containsEntry("Authorization", "env:TEST_MCP_TOKEN");
         }
 
         @Test
-        @DisplayName("outbound URLs at the validation-engine MCP root resolve to the validation-engine connection")
-        void validationEngineUrl_routesToConnection() {
+        @DisplayName("outbound URLs at the MCP root resolve to the registered connection")
+        void connectionUrl_routesToConnection() {
             McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
             when(repo.findAllEnabled()).thenReturn(List.of(
                     conn(CONNECTION_NAME, DEFAULT_URL, Map.of())
@@ -153,22 +151,22 @@ class McpConnectionsCacheTest {
             McpConnectionsCache cache = new McpConnectionsCache(repo);
 
             // Spring AI appends /sse, message paths, etc. — longest-prefix match must still
-            // resolve them all back to "validation-engine" so the header customizer attaches
-            // the token on every outbound MCP request.
+            // resolve them all back to the registered connection so the header customizer
+            // attaches the token on every outbound MCP request.
             assertThat(cache.connectionNameForUri(DEFAULT_URL + "/sse")).contains(CONNECTION_NAME);
             assertThat(cache.connectionNameForUri(DEFAULT_URL + "/message/abc")).contains(CONNECTION_NAME);
             assertThat(cache.connectionNameForUri("http://elsewhere/sse"))
-                    .as("requests outside the validation-engine prefix must NOT pick up its token")
+                    .as("requests outside the registered prefix must NOT pick up its token")
                     .isEmpty();
         }
 
         @Test
-        @DisplayName("validation-engine row with enabled=false is omitted — graceful degradation when ops disables it")
-        void validationEngineDisabled_doesNotAppear() {
+        @DisplayName("connection row with enabled=false is omitted — graceful degradation when ops disables it")
+        void connectionDisabled_doesNotAppear() {
             // findAllEnabled() filters disabled rows at the repository level (see
             // McpConnectionsRepository SQL), so the cache never sees them. Simulate that
-            // by returning an empty list — the engine still boots, the validator persona
-            // simply has no MCP backend available until the connection is re-enabled.
+            // by returning an empty list — the engine still boots, any persona depending on
+            // that MCP backend simply has no tools available until the connection is re-enabled.
             McpConnectionsRepository repo = mock(McpConnectionsRepository.class);
             when(repo.findAllEnabled()).thenReturn(List.of());
 

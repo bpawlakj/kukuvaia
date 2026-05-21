@@ -135,6 +135,28 @@ cd ../kukuvaia-admin
 npm install
 ```
 
+### 5. Register provider, models, and role assignments in the admin dashboard
+
+After the engine is up (`./gradlew :kukuvaia-app:bootRun`) and the admin dev server is running (`npm run dev` in `kukuvaia-admin/`), open **http://localhost:5173** and do the following — in order:
+
+1. **Providers** → *Add provider.* Create one entry per LLM endpoint you want to use (e.g. `openai`, `openrouter`, `github-copilot`, `smartgate`, `ollama-local`). You provide a name, base URL (e.g. `https://api.openai.com`), the auth scheme, and the API key / token. Without at least one provider, the engine cannot route any LLM call — chats will fail with `No provider configured`.
+
+2. **Models** → *Add model.* For each provider, register the concrete models you want callable (e.g. `gpt-5`, `claude-sonnet-4.5`, `llama3.1:70b`). Each model belongs to a provider and gets a **tier** (small / medium / large) that the orchestrator uses for cost-vs-capability routing. A provider with no registered models is unusable.
+
+3. **Roles** → *Assign model to role.* This is the routing layer — Kukuvaia's agent loop picks a model **per role**, not per call. Assign one model to each of these roles:
+
+   | Role | Used for |
+   |------|----------|
+   | `supervisor` | Top-level planning, decomposition, oversight (pick your strongest reasoning model) |
+   | `advisor` | Critique, review, second-opinion passes |
+   | `worker` | Default tool-using agent — the model that runs the bulk of conversations |
+   | `worker-2` | Secondary worker for parallel sub-agents |
+   | `worker-3` | Tertiary worker (used by Embabel GOAP planning fan-out) |
+
+   The values in `LLM_MODEL` / `LLM_BASE_URL` from `.env` are only the **bootstrap fallback** — once role assignments exist in the DB, they take precedence. If a role has no assignment, requests routed to that role will return `No model assigned for role <name>`.
+
+> Smoke test: with at least the `worker` role assigned, the CLI's first `hello` should respond. If you also want planning + critique to work end-to-end (which most agent flows trigger), assign `supervisor` and `advisor` too — otherwise multi-step plans will fail mid-flight.
+
 ---
 
 ## Daily Development
@@ -242,6 +264,8 @@ npm run build                           # tsc + vite build
 **Flyway fails with `extension "vector" is not available`** — you used plain `postgres:17` instead of `pgvector/pgvector:pg17`. Recreate the container.
 
 **`403` on `/api/*`** — either enable dev mode (`KUKUVAIA_SECURITY_DEV_MODE=true`, default) or provide a valid Bearer token per the auth scheme.
+
+**`No provider configured` / `No model assigned for role <name>`** — you skipped step 5 of First-time Setup. Open the admin dashboard at http://localhost:5173 and add a provider → register a model → assign it to the missing role. The engine reads these from the DB at request time, no restart needed.
 
 **CLI prints escape codes like `]11;rgb:0000/0000/0000\`** — known issue when `glamour.WithAutoStyle()` queries terminal background. Fixed on `main`; rebuild the CLI.
 

@@ -123,8 +123,8 @@ class ConversationSummariserTest {
 
         List<Message> turns = List.of(
                 new UserMessage("create rule X"),
-                toolCall("c1", "create_rule", "{}"),
-                toolResp("c1", "create_rule", "REJECT_PREREQUISITE_NEVER_MATCHED"),
+                toolCall("c1", "tool_alpha", "{}"),
+                toolResp("c1", "tool_alpha", "REJECT_GENERIC_ERROR"),
                 new AssistantMessage("done"),
                 new SystemMessage("[compacted: 3 attempts collapsed]"));
 
@@ -135,9 +135,9 @@ class ConversationSummariserTest {
         String userPrompt = captor.getValue().getInstructions().get(1).getText();
         assertThat(userPrompt).contains("operator started rule editing");
         assertThat(userPrompt).contains("USER: create rule X");
-        assertThat(userPrompt).contains("[tool_call: create_rule]");
-        assertThat(userPrompt).contains("TOOL_RESULT: create_rule");
-        assertThat(userPrompt).contains("REJECT_PREREQUISITE_NEVER_MATCHED");
+        assertThat(userPrompt).contains("[tool_call: tool_alpha]");
+        assertThat(userPrompt).contains("TOOL_RESULT: tool_alpha");
+        assertThat(userPrompt).contains("REJECT_GENERIC_ERROR");
         assertThat(userPrompt).contains("SYSTEM_NOTE:");
     }
 

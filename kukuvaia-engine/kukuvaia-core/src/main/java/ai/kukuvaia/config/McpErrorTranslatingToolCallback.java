@@ -12,7 +12,7 @@ import org.springframework.ai.tool.metadata.ToolMetadata;
  * failures become structured, agent-readable error strings instead of raw stack traces.
  *
  * <p>Why this exists: Spring AI 1.1's {@code SyncMcpToolCallback} throws {@link RuntimeException}
- * with the upstream HTTP body embedded in the message. When the validation-engine restarts and
+ * with the upstream HTTP body embedded in the message. When a remote MCP peer restarts and
  * the {@code McpSyncClient} bean (built once at startup, no auto-reconnect) hits a stale SSE
  * session, the response is a 404 with body {@code "Session not found: <uuid>"}. Without this
  * decorator, the LLM tool result becomes a 4-line opening followed by a 100-line stack trace —
@@ -73,22 +73,22 @@ final class McpErrorTranslatingToolCallback implements ToolCallback {
             log.warn("MCP tool '{}' failed with stale SSE session — kukuvaia-app must be restarted "
                     + "to re-establish the transport. Original message head: {}",
                     toolName, msg.length() > 200 ? msg.substring(0, 200) : msg);
-            return ("ERROR: MCP transport stale. The upstream MCP server (validation-engine) "
+            return ("ERROR: MCP transport stale. An upstream MCP server (tool '" + toolName + "') "
                     + "restarted since this kukuvaia-app process started, and Spring AI's "
                     + "McpSyncClient does not auto-reconnect. The kukuvaia-app process must be "
                     + "restarted to re-establish the SSE session — surface this verbatim to the "
                     + "operator and STOP. Do NOT fabricate a different cause (e.g. 'MediaType "
-                    + "mismatch', 'transient streaming error', 'try a smaller outline') — that "
-                    + "wastes the operator's time chasing a wrong fix.");
+                    + "mismatch', 'transient streaming error') — that wastes the operator's "
+                    + "time chasing a wrong fix.");
         }
         // Network-level connection failures — same flavour, similar fix on the operator side.
         if (msg.contains("Connection refused") || msg.contains("Connection reset")) {
             log.warn("MCP tool '{}' failed with transport-level connection error: {}",
                     toolName, msg);
-            return ("ERROR: MCP transport connection failed. The MCP server (validation-engine) "
-                    + "is unreachable from kukuvaia-app — likely not running, or the network path "
-                    + "between the two processes is broken. Surface this verbatim to the operator "
-                    + "and STOP.");
+            return ("ERROR: MCP transport connection failed. The upstream MCP server backing "
+                    + "tool '" + toolName + "' is unreachable from kukuvaia-app — likely not "
+                    + "running, or the network path between the two processes is broken. "
+                    + "Surface this verbatim to the operator and STOP.");
         }
         // Anything else — let it bubble through the normal error path.
         throw e;

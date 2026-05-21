@@ -4,7 +4,7 @@ package ai.kukuvaia.agent.subagent;
  * Input for parallel worker execution.
  *
  * @param task           task description for the sub-agent
- * @param specialistType specialist name (e.g., "analyst", "validator")
+ * @param specialistType specialist name (e.g., "analyst", "summarizer")
  */
 public record WorkerTask(String task, String specialistType) {
 

@@ -285,17 +285,17 @@ class ContextCompactionAdvisorTest {
     void phaseB_retryLoopCollapse() {
         var a = advisor(400, 5, 1);
 
-        String rejectPayload = "InvariantViolationException: REJECT_PREREQUISITE_NEVER_MATCHED";
+        String rejectPayload = "InvariantViolationException: REJECT_GENERIC_ERROR";
         List<Message> msgs = new ArrayList<>();
         msgs.add(new SystemMessage("persona"));
         msgs.add(new UserMessage("create rule"));
         // Four consecutive failed attempts with similar (but not identical — varying value) args.
         for (int i = 1; i <= 4; i++) {
-            msgs.add(toolCall("c" + i, "create_rule",
+            msgs.add(toolCall("c" + i, "tool_alpha",
                     "{\"outlineId\":\"u" + i + "\",\"ruleJson\":\"v" + i + "\"}"));
             // Bulk the response so the fixture clears the 395-token sanity floor; mimics
-            // a real REJECT payload with sectionType histogram + reasoning trail.
-            msgs.add(toolResponse("c" + i, "create_rule",
+            // a real REJECT payload with diagnostic histogram + reasoning trail.
+            msgs.add(toolResponse("c" + i, "tool_alpha",
                     rejectPayload + " attempt-" + i + " " + bigPayload(300)));
         }
         msgs.add(new UserMessage("status?"));
@@ -314,8 +314,8 @@ class ContextCompactionAdvisorTest {
         }
         // One synthetic note naming the verdict pattern.
         boolean hasNote = after.stream().anyMatch(m -> m instanceof SystemMessage
-                && m.getText().contains("agent attempted `create_rule` 4 time(s)")
-                && m.getText().contains("REJECT_PREREQUISITE_NEVER_MATCHED"));
+                && m.getText().contains("agent attempted `tool_alpha` 4 time(s)")
+                && m.getText().contains("REJECT_GENERIC_ERROR"));
         assertThat(hasNote).isTrue();
 
         ArgumentCaptor<OutputBlock> emitted = ArgumentCaptor.forClass(OutputBlock.class);
@@ -431,7 +431,7 @@ class ContextCompactionAdvisorTest {
     @Test
     @DisplayName("Phase C — registered tool summary applied to older response, warning notes count")
     void phaseC_registeredSummary_appliedBeforePhaseA() {
-        registry.register("introspect", (args, data) -> "schema: 47 sectionTypes, 23 boolean specs");
+        registry.register("introspect", (args, data) -> "schema: 47 entries, 23 of kind A");
         var a = advisorWithPhaseC(300, 5, /* keepLast */ 1, /* defaultElision */ false);
 
         // Three identical-tool but distinct-args calls — Phase B doesn't fold them (distinct args)

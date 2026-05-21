@@ -48,10 +48,10 @@ class HelpCommandTest {
 
         // Registry contains BOTH a persona-specific MCP tool AND a general internal tool.
         when(toolRegistry.toolNames()).thenReturn(
-                List.of("find_outline_templates", "create_rule", "startPlanning", "list_plans"));
-        // Named personas (validator, rule-editor) collectively whitelist the MCP tools below.
+                List.of("tool_persona_alpha", "tool_persona_beta", "startPlanning", "list_plans"));
+        // Named personas (test-persona-2, test-persona) collectively whitelist the MCP tools below.
         when(personaService.namedPersonaToolUnion()).thenReturn(
-                Set.of("find_outline_templates", "create_rule"));
+                Set.of("tool_persona_alpha", "tool_persona_beta"));
 
         helpCommand = new HelpCommand(appContext, toolRegistry, skillRegistry, personaService);
     }
@@ -78,17 +78,17 @@ class HelpCommandTest {
                 .anyMatch(tb -> tb.content().startsWith("General tools:")
                         && tb.content().contains("startPlanning")
                         && tb.content().contains("list_plans")
-                        && !tb.content().contains("find_outline_templates")
-                        && !tb.content().contains("create_rule"));
+                        && !tb.content().contains("tool_persona_alpha")
+                        && !tb.content().contains("tool_persona_beta"));
     }
 
     @Test
-    @DisplayName("named persona (rule-editor) — Persona tools section + General tools section")
+    @DisplayName("named persona (test-persona) — Persona tools section + General tools section")
     void namedPersona_personaPlusGeneral() {
         when(personaService.getActivePersona("s1"))
                 .thenReturn(new PersonaSpec(
-                        "rule-editor", "trusted operator", "prompt",
-                        List.of("find_outline_templates", "create_rule", "promote_rule"))); // promote_rule unregistered
+                        "test-persona", "trusted operator", "prompt",
+                        List.of("tool_persona_alpha", "tool_persona_beta", "tool_persona_gamma"))); // tool_persona_gamma unregistered
 
         List<OutputBlock> blocks = helpCommand.execute("", "s1");
 
@@ -97,12 +97,12 @@ class HelpCommandTest {
                 .map(b -> (TextBlock) b)
                 .toList();
 
-        // Persona tools — includes ONLY tools that are also in the registry (promote_rule filtered out)
+        // Persona tools — includes ONLY tools that are also in the registry (tool_persona_gamma filtered out)
         assertThat(textBlocks)
-                .anyMatch(tb -> tb.content().startsWith("Persona tools (rule-editor):")
-                        && tb.content().contains("find_outline_templates")
-                        && tb.content().contains("create_rule")
-                        && !tb.content().contains("promote_rule"));
+                .anyMatch(tb -> tb.content().startsWith("Persona tools (test-persona):")
+                        && tb.content().contains("tool_persona_alpha")
+                        && tb.content().contains("tool_persona_beta")
+                        && !tb.content().contains("tool_persona_gamma"));
 
         // General tools still present, still excludes the persona's MCP tools
         assertThat(textBlocks)

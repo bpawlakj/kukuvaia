@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * Interactive choice prompt — emitted whenever the agent needs the operator to disambiguate
- * between several candidates (e.g. find_outline_templates returned 3 matches) or to confirm a
+ * between several candidates (e.g. a search tool returned multiple matches) or to confirm a
  * specific course of action.
  *
  * <p>The CLI auto-opens an arrow-navigable picker on receipt; the operator selects an option and

@@ -40,12 +40,12 @@ class ChatControllerTest {
     @Test
     @DisplayName("chat — non-blank persona binds session BEFORE routing")
     void chat_persona_binds() {
-        var request = new ChatRequest("session-1", "hello", "rule-editor");
+        var request = new ChatRequest("session-1", "hello", "test-persona");
 
         List<OutputBlock> blocks = controller.chat(request).collectList().block();
 
         assertThat(blocks).hasSize(1);
-        verify(personaService).applyIfPresent(eq("session-1"), eq("rule-editor"));
+        verify(personaService).applyIfPresent(eq("session-1"), eq("test-persona"));
         verify(commandRouter).route("hello", "session-1");
     }
 

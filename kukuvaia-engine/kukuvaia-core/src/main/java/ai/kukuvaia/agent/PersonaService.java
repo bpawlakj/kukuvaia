@@ -1,9 +1,11 @@
 package ai.kukuvaia.agent;
 
+import ai.kukuvaia.extensions.ExtensionLoader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
@@ -21,8 +23,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Loads persona definitions from classpath and user .kukuvaia/ directory.
+ * Loads persona definitions from classpath and the user's {@code .kukuvaia/personas/} directory.
  * Manages active persona per session.
+ *
+ * <p>The engine itself ships no concrete personas — those are deployment-supplied via
+ * {@code .kukuvaia/personas/*.yaml}. The classpath loader remains as a generic mechanism so
+ * tests (and any future bundled personas) can drop YAMLs under {@code classpath:personas/}.
  */
 @Service
 public class PersonaService {
@@ -35,14 +41,24 @@ public class PersonaService {
     private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
     private final SupervisorVerbosity supervisorVerbosity;
 
-    public PersonaService(@Value("${kukuvaia.supervisor.verbosity:FULL}") SupervisorVerbosity supervisorVerbosity) {
+    @Autowired
+    public PersonaService(
+            @Value("${kukuvaia.supervisor.verbosity:FULL}") SupervisorVerbosity supervisorVerbosity,
+            ExtensionLoader extensionLoader) {
         this.supervisorVerbosity = supervisorVerbosity;
         log.info("Supervisor verbosity = {}", supervisorVerbosity);
         loadBuiltInPersonas();
+        if (extensionLoader != null) {
+            extensionLoader.getPersonasDir().ifPresent(this::loadFromDirectory);
+        }
+    }
+
+    public PersonaService(SupervisorVerbosity supervisorVerbosity) {
+        this(supervisorVerbosity, null);
     }
 
     public PersonaService() {
-        this(SupervisorVerbosity.FULL);
+        this(SupervisorVerbosity.FULL, null);
     }
 
     public PersonaSpec getActivePersona(String sessionId) {
@@ -114,9 +130,9 @@ public class PersonaService {
     }
 
     /**
-     * Load every {@code classpath:personas/*.yaml} into the registry. Built-in classpath personas
-     * carry feature-specific system prompts and tool whitelists (e.g. {@code validator},
-     * {@code rule-editor}); they ship with the engine and are loaded once at startup.
+     * Load every {@code classpath:personas/*.yaml} into the registry. Kept as a generic loader
+     * for tests and any future bundled personas — the engine itself ships none. Deployment-supplied
+     * personas live in {@code .kukuvaia/personas/} and are picked up via {@link ExtensionLoader}.
      */
     private void loadFromClasspath() {
         try {

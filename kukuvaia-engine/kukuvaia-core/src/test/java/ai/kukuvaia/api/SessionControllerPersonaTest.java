@@ -32,13 +32,13 @@ class SessionControllerPersonaTest {
     @DisplayName("setPersona — happy path: 200 with sessionId+persona echoed")
     void setPersona_happyPath() {
         ResponseEntity<Map<String, Object>> response = controller.setPersona(
-                "session-1", Map.of("persona", "rule-editor"));
+                "session-1", Map.of("persona", "test-persona"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody())
                 .containsEntry("sessionId", "session-1")
-                .containsEntry("persona", "rule-editor");
-        verify(personaService).setActivePersona("session-1", "rule-editor");
+                .containsEntry("persona", "test-persona");
+        verify(personaService).setActivePersona("session-1", "test-persona");
     }
 
     @Test

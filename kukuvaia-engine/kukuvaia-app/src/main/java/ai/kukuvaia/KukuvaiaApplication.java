@@ -18,8 +18,8 @@ import ai.kukuvaia.provider.copilot.CopilotTokenProvider;
         "org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration",
         // kukuvaia is an MCP CLIENT only — it does NOT re-expose its tools as an MCP server.
         // The aggregator below builds a List<SyncToolSpecification> by calling listTools()
-        // on every registered MCP client; an unreachable client (e.g. the validation-engine
-        // peer down during startup) makes that aggregator throw, which then tears down the
+        // on every registered MCP client; an unreachable client (any remote MCP peer that
+        // is down during startup) makes that aggregator throw, which then tears down the
         // whole ApplicationContext. We don't use the bean, so we drop the autoconfig.
         "org.springframework.ai.mcp.server.common.autoconfigure.ToolCallbackConverterAutoConfiguration",
         "org.springframework.ai.mcp.server.common.autoconfigure.StatelessToolCallbackConverterAutoConfiguration"

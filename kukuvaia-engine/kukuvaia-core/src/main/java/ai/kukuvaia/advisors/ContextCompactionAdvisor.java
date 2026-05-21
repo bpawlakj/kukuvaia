@@ -34,8 +34,8 @@ import org.springframework.stereotype.Component;
  * <ol>
  *   <li><b>Phase B — retry-loop collapse:</b> consecutive failed pairs for the same tool
  *       (similar args) are merged into one synthetic note + the most recent attempt verbatim.
- *       Catches the 2026-05-13 case where 4× create_rule with identical wrong args overflowed
- *       the window.</li>
+ *       Catches the common "retry loop with identical wrong args" pattern that otherwise
+ *       overflows the window.</li>
  *   <li><b>Phase B — duplicate fold:</b> older tool-call pairs with the same tool + canonical
  *       args as a later pair are replaced with one-line {@link SystemMessage} pointers.</li>
  *   <li><b>Phase C — per-tool response summary:</b> tool-call pairs OUTSIDE the last

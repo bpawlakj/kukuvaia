@@ -22,8 +22,7 @@ import java.util.Set;
  * <ul>
  *   <li><b>Persona tools</b> — registered tools that fall under the active persona's
  *       {@code toolFilter}. Shown only when a non-default persona is active. These are typically
- *       MCP tools mounted by that persona (e.g. {@code create_rule}, {@code find_outline_templates}
- *       under {@code rule-editor}).</li>
+ *       MCP tools mounted by that persona via its YAML whitelist.</li>
  *   <li><b>General tools</b> — registered tools that are NOT in any named persona's
  *       {@code toolFilter}. These are always reachable regardless of persona — typically internal
  *       kukuvaia tools (planning, sessions, etc.).</li>

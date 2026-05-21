@@ -31,7 +31,7 @@ class McpErrorTranslatingToolCallbackTest {
     @Test
     @DisplayName("happy path — successful delegate.call passes through unchanged")
     void happyPath_passThrough() {
-        ToolCallback delegate = delegateWithName("find_outline");
+        ToolCallback delegate = delegateWithName("tool_alpha");
         when(delegate.call("input")).thenReturn("ok");
 
         assertThat(wrap(delegate).call("input")).isEqualTo("ok");
@@ -40,7 +40,7 @@ class McpErrorTranslatingToolCallbackTest {
     @Test
     @DisplayName("'Session not found' from a stale SSE peer becomes a structured 'restart kukuvaia' instruction")
     void sessionNotFound_translated() {
-        ToolCallback delegate = delegateWithName("find_outline");
+        ToolCallback delegate = delegateWithName("tool_alpha");
         when(delegate.call("input"))
                 .thenThrow(new RuntimeException(
                         "Sending message failed with a non-OK HTTP code: 404 - "
@@ -60,7 +60,7 @@ class McpErrorTranslatingToolCallbackTest {
     @Test
     @DisplayName("Connection refused / reset becomes a structured 'peer unreachable' instruction")
     void connectionFailure_translated() {
-        ToolCallback delegate = delegateWithName("find_outline");
+        ToolCallback delegate = delegateWithName("tool_alpha");
         when(delegate.call("input"))
                 .thenThrow(new RuntimeException("Connection refused: localhost/127.0.0.1:8081"));
 
@@ -73,14 +73,14 @@ class McpErrorTranslatingToolCallbackTest {
     @Test
     @DisplayName("any other exception is re-thrown — only known transport patterns are translated")
     void unknownException_rethrown() {
-        ToolCallback delegate = delegateWithName("find_outline");
-        when(delegate.call("input")).thenThrow(new RuntimeException("Internal validator bug"));
+        ToolCallback delegate = delegateWithName("tool_alpha");
+        when(delegate.call("input")).thenThrow(new RuntimeException("Internal checker bug"));
 
         // Real bugs must keep flowing through Spring AI's normal error path so they're surfaced
         // to the operator with their original cause — masking everything would just trade one
         // halucynacja for another.
         assertThatThrownBy(() -> wrap(delegate).call("input"))
                 .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Internal validator bug");
+                .hasMessageContaining("Internal checker bug");
     }
 }

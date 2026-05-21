@@ -15,9 +15,9 @@ import java.util.UUID;
 
 /**
  * Generic "ask the user to pick one" capability. Whenever the LLM cannot pick an answer for the
- * operator on its own — either because a discovery tool returned multiple matches (typical for
- * {@code find_outline_templates}) or because the user's intent is genuinely ambiguous — calling
- * this tool emits a {@link ChoiceBlock} into the SSE stream so the CLI can render an
+ * operator on its own — either because a discovery tool returned multiple matches or because the
+ * user's intent is genuinely ambiguous — calling this tool emits a {@link ChoiceBlock} into the
+ * SSE stream so the CLI can render an
  * arrow-navigable picker. The tool returns immediately; the LLM is expected to STOP its turn,
  * the operator's selection arrives as the next user message, and the LLM picks up from there.
  *

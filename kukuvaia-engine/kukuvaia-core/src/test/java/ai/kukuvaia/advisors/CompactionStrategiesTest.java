@@ -143,16 +143,16 @@ class CompactionStrategiesTest {
     class CollapseRetries {
 
         @Test
-        @DisplayName("2026-05-13 replay — 4× create_rule with L2 reject collapses to one synthetic note")
+        @DisplayName("2026-05-13 replay — 4× tool_alpha with L2 reject collapses to one synthetic note")
         void retryReplay_collapsesToNote() {
-            String rejectPayload = "InvariantViolationException: REJECT_PREREQUISITE_NEVER_MATCHED — "
+            String rejectPayload = "InvariantViolationException: REJECT_GENERIC_ERROR — "
                     + "histogram [Lesson=12, Page=8]";
             List<Message> msgs = new ArrayList<>();
             msgs.add(new SystemMessage("persona"));
             msgs.add(new UserMessage("create a rule"));
             for (int i = 1; i <= 4; i++) {
-                msgs.add(toolCall("c" + i, "create_rule", "{\"outlineId\":\"wrong-uuid\"}"));
-                msgs.add(toolResponse("c" + i, "create_rule", rejectPayload));
+                msgs.add(toolCall("c" + i, "tool_alpha", "{\"outlineId\":\"wrong-uuid\"}"));
+                msgs.add(toolResponse("c" + i, "tool_alpha", rejectPayload));
             }
 
             var res = CompactionStrategies.collapseRetryLoops(msgs);
@@ -178,9 +178,9 @@ class CompactionStrategiesTest {
                     .filter(t -> t.startsWith("[compacted: agent attempted"))
                     .findFirst()
                     .orElseThrow();
-            assertThat(note).contains("create_rule");
+            assertThat(note).contains("tool_alpha");
             assertThat(note).contains("4 time(s)");
-            assertThat(note).contains("REJECT_PREREQUISITE_NEVER_MATCHED");
+            assertThat(note).contains("REJECT_GENERIC_ERROR");
         }
 
         @Test
@@ -189,12 +189,12 @@ class CompactionStrategiesTest {
             List<Message> msgs = new ArrayList<>();
             msgs.add(new SystemMessage("persona"));
             msgs.add(new UserMessage("go"));
-            msgs.add(toolCall("c1", "create_rule", "{\"x\":1}"));
-            msgs.add(toolResponse("c1", "create_rule", "REJECT_PREREQUISITE_NEVER_MATCHED"));
-            msgs.add(toolCall("c2", "create_rule", "{\"x\":1}"));
-            msgs.add(toolResponse("c2", "create_rule", "success"));    // interrupts the failure run
-            msgs.add(toolCall("c3", "create_rule", "{\"x\":1}"));
-            msgs.add(toolResponse("c3", "create_rule", "REJECT_PREREQUISITE_NEVER_MATCHED"));
+            msgs.add(toolCall("c1", "tool_alpha", "{\"x\":1}"));
+            msgs.add(toolResponse("c1", "tool_alpha", "REJECT_GENERIC_ERROR"));
+            msgs.add(toolCall("c2", "tool_alpha", "{\"x\":1}"));
+            msgs.add(toolResponse("c2", "tool_alpha", "success"));    // interrupts the failure run
+            msgs.add(toolCall("c3", "tool_alpha", "{\"x\":1}"));
+            msgs.add(toolResponse("c3", "tool_alpha", "REJECT_GENERIC_ERROR"));
 
             var res = CompactionStrategies.collapseRetryLoops(msgs);
 
@@ -208,11 +208,11 @@ class CompactionStrategiesTest {
             List<Message> msgs = new ArrayList<>();
             msgs.add(new SystemMessage("persona"));
             msgs.add(new UserMessage("go"));
-            msgs.add(toolCall("c1", "create_rule", "{\"x\":1}"));
-            msgs.add(toolResponse("c1", "create_rule", "Error calling tool: bad outline"));
+            msgs.add(toolCall("c1", "tool_alpha", "{\"x\":1}"));
+            msgs.add(toolResponse("c1", "tool_alpha", "Error calling tool: bad outline"));
             msgs.add(new UserMessage("try again with outline-Y"));
-            msgs.add(toolCall("c2", "create_rule", "{\"x\":1}"));
-            msgs.add(toolResponse("c2", "create_rule", "Error calling tool: still bad"));
+            msgs.add(toolCall("c2", "tool_alpha", "{\"x\":1}"));
+            msgs.add(toolResponse("c2", "tool_alpha", "Error calling tool: still bad"));
 
             var res = CompactionStrategies.collapseRetryLoops(msgs);
 
@@ -227,10 +227,10 @@ class CompactionStrategiesTest {
             msgs.add(new SystemMessage("persona"));
             msgs.add(new UserMessage("go"));
             // Both args share keys "outlineId" and "ruleJson" (100 % key overlap, only values differ).
-            msgs.add(toolCall("c1", "create_rule", "{\"outlineId\":\"u1\",\"ruleJson\":\"v1\"}"));
-            msgs.add(toolResponse("c1", "create_rule", "ANTI_PATTERN: bad var ref"));
-            msgs.add(toolCall("c2", "create_rule", "{\"outlineId\":\"u2\",\"ruleJson\":\"v2\"}"));
-            msgs.add(toolResponse("c2", "create_rule", "ANTI_PATTERN: bad var ref"));
+            msgs.add(toolCall("c1", "tool_alpha", "{\"outlineId\":\"u1\",\"ruleJson\":\"v1\"}"));
+            msgs.add(toolResponse("c1", "tool_alpha", "ANTI_PATTERN: bad var ref"));
+            msgs.add(toolCall("c2", "tool_alpha", "{\"outlineId\":\"u2\",\"ruleJson\":\"v2\"}"));
+            msgs.add(toolResponse("c2", "tool_alpha", "ANTI_PATTERN: bad var ref"));
 
             var res = CompactionStrategies.collapseRetryLoops(msgs);
 

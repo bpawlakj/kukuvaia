@@ -42,10 +42,10 @@ class CommandControllerTest {
 
         ResponseEntity<List<OutputBlock>> response = controller.executeCommand(
                 "help",
-                Map.of("args", "", "sessionId", "session-1", "persona", "rule-editor"));
+                Map.of("args", "", "sessionId", "session-1", "persona", "test-persona"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        verify(personaService).applyIfPresent("session-1", "rule-editor");
+        verify(personaService).applyIfPresent("session-1", "test-persona");
         verify(command).execute("", "session-1");
     }
 

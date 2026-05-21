@@ -43,7 +43,7 @@ class AgentRunRepositoryTest {
     void insertQueued_sqlShape() {
         ObjectNode input = JsonNodeFactory.instance.objectNode().put("ruleId", "r-1");
         AgentRunSpec spec = new AgentRunSpec(
-                "validation-engine:rule-evaluator", "agent",
+                "test-mcp:test-evaluator", "agent",
                 "validation_rule_drafting", input,
                 /*personaName*/ null,
                 /*llmFollowup*/ null,

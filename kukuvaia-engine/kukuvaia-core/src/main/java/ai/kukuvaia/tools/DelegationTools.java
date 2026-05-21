@@ -38,14 +38,14 @@ public class DelegationTools {
     @Tool(description = "Delegate a task to a specialist sub-agent. Use for tasks that require a specific specialist skill. Returns the specialist's response.")
     public String delegate_to_specialist(
             @ToolParam(description = "Task description for the specialist") String task,
-            @ToolParam(description = "Specialist type (e.g., 'analyst', 'validator')") String specialistType) {
+            @ToolParam(description = "Specialist type (e.g., 'analyst', 'summarizer')") String specialistType) {
         log.info("delegate_to_specialist: specialist={}, taskLength={}", specialistType, task.length());
         return subAgentFactory.execute(task, specialistType, ExecutionContext.INTERACTIVE, null);
     }
 
     @Tool(description = "Delegate multiple tasks to workers in parallel. Each task runs concurrently on a separate worker. Input: JSON array of objects with 'task' and 'specialistType' fields. Returns JSON array of results with status, result, and durationMs per worker.")
     public String delegate_to_workers(
-            @ToolParam(description = "JSON array of worker tasks, e.g. [{\"task\":\"analyze X\",\"specialistType\":\"analyst\"},{\"task\":\"validate Y\",\"specialistType\":\"validator\"}]") String tasksJson) {
+            @ToolParam(description = "JSON array of worker tasks, e.g. [{\"task\":\"analyze X\",\"specialistType\":\"analyst\"},{\"task\":\"summarise Y\",\"specialistType\":\"summarizer\"}]") String tasksJson) {
         log.info("delegate_to_workers: parsing {} chars of task JSON", tasksJson.length());
 
         try {

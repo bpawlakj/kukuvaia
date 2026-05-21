@@ -64,7 +64,7 @@ public class SubAgentFactory {
      * Execute a task via specialist sub-agent with full security enforcement.
      *
      * @param task             task description (already sanitized by caller)
-     * @param specialistType   specialist name (e.g., "analyst", "validator")
+     * @param specialistType   specialist name (e.g., "analyst", "summarizer")
      * @param context          execution context (INTERACTIVE or DAEMON)
      * @param providerOverride explicit provider or null for context default
      * @return sub-agent's synthesized result

@@ -96,11 +96,9 @@ spring:
         enabled: ${KUKUVAIA_MCP_CLIENT_ENABLED:false}
         name: kukuvaia-engine
         version: 0.1.0
-        # 60s — covers cold ETSL queries (e.g. outline-template listing pulling sectiontypes /
-        # metadata / publication-suite per row) and slower MongoDB round-trips on shared dev
-        # boxes. The previous 30s default tripped on the rule-editor's `find_outline_templates`
-        # call when ETSL was warming up its caches; a 2× headroom is cheap and avoids spurious
-        # tool-loop aborts.
+        # 60s — covers slow cold-cache tool calls against remote MCP servers (large list
+        # responses, cross-DB joins). The 30s Spring default trips on warm-up scenarios;
+        # a 2× headroom is cheap and avoids spurious tool-loop aborts.
         request-timeout: 60s
         type: SYNC
         toolcallback:

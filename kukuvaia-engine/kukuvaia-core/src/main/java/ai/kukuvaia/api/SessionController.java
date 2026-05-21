@@ -118,7 +118,7 @@ public class SessionController {
     /**
      * Bind a persona to this session for subsequent chat / command requests.
      *
-     * <p>Body: {@code {"persona": "rule-editor"}}. Returns 400 with an explanation when the
+     * <p>Body: {@code {"persona": "<persona-name>"}}. Returns 400 with an explanation when the
      * persona name does not exist — caller decides whether to retry or fall back. Used by ad-hoc
      * persona switching from the CLI; the CLI also pushes persona on every chat request, so this
      * endpoint is mainly useful for tooling and diagnostics.

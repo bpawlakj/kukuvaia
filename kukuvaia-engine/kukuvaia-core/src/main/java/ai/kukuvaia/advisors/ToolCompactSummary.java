@@ -17,9 +17,8 @@ package ai.kukuvaia.advisors;
  *       of Phase C is to be cheap; expensive summaries belong in Phase D.</li>
  * </ul>
  *
- * <p>Example: for {@code introspect_section_schema} we return
- * {@code "schema for template <X>: 47 sectionTypes, 23 boolean specs"} — a couple of
- * hundred bytes instead of the original 50 KB JSON dump.
+ * <p>Example: a registered summary might collapse a 50 KB JSON dump into a couple of hundred
+ * bytes capturing headline counts (e.g. {@code "schema for <X>: 47 entries, 23 of kind A"}).
  */
 @FunctionalInterface
 public interface ToolCompactSummary {

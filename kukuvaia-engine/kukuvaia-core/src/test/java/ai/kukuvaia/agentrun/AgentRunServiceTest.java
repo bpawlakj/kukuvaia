@@ -91,13 +91,13 @@ class AgentRunServiceTest {
     @DisplayName("runSync with personaName resolves PersonaService systemPrompt")
     void runSync_personaResolvedFromService() {
         when(personaService.allPersonas()).thenReturn(Map.of(
-                "rule-editor", new PersonaSpec("rule-editor", "desc", "PERSONA SYSTEM PROMPT", List.of())));
+                "test-persona", new PersonaSpec("test-persona", "desc", "PERSONA SYSTEM PROMPT", List.of())));
         stubLlmResponse("{\"ok\":true}", 10, 5, "claude-haiku-4-5");
         // storeEmbedding=true triggers embeddingService.isAvailable() inside maybeEmbed
         when(embeddingService.isAvailable()).thenReturn(false);
 
         AgentRunSpec spec = baseSpec(JsonNodeFactory.instance.objectNode().put("a", 1),
-                "rule-editor",
+                "test-persona",
                 new LlmFollowupSpec(null, null, true, true, null, false,
                         SimilarityContextSpec.disabled(), null));
 
@@ -112,11 +112,11 @@ class AgentRunServiceTest {
     @DisplayName("runSync with personaName + override appends override after persona prompt")
     void runSync_personaPlusOverride_appended() {
         when(personaService.allPersonas()).thenReturn(Map.of(
-                "rule-editor", new PersonaSpec("rule-editor", "desc", "BASE", List.of())));
+                "test-persona", new PersonaSpec("test-persona", "desc", "BASE", List.of())));
         stubLlmResponse("ok", 1, 1, "model-x");
 
         AgentRunSpec spec = baseSpec(JsonNodeFactory.instance.objectNode().put("a", 1),
-                "rule-editor",
+                "test-persona",
                 new LlmFollowupSpec("EXTRA INSTRUCTIONS", null, true, false, null, false,
                         SimilarityContextSpec.disabled(), null));
 
