@@ -13,7 +13,7 @@ credentials.json
 **/.gradle/
 **/*.class
 **/*.jar
-!gradle/wrapper/*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
 **/hs_err_pid*
 **/replay_pid*
 

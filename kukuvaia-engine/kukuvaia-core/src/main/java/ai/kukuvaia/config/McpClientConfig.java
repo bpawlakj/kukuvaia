@@ -14,6 +14,7 @@ import org.springframework.ai.mcp.client.common.autoconfigure.McpSseClientConnec
 import org.springframework.ai.mcp.client.common.autoconfigure.NamedClientMcpTransport;
 import org.springframework.ai.mcp.client.common.autoconfigure.properties.McpClientCommonProperties;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -44,8 +45,15 @@ import java.util.Map;
  * — the customizer resolves them from {@link System#getenv(String)} at
  * request time. Any other value is used verbatim. Missing env vars are
  * skipped with a warning so a rotation slip doesn't spam errors per turn.
+ *
+ * <p>Gated on {@code spring.ai.mcp.client.enabled=true}: these beans inject
+ * {@link McpClientCommonProperties}, which Spring AI's MCP client autoconfigure
+ * only registers when the client is enabled. With MCP disabled (the default),
+ * the whole config is skipped — {@code McpToolDiscoveryLogger} then receives an
+ * empty {@code List<McpSyncClient>} and the engine boots standalone.
  */
 @Configuration
+@ConditionalOnProperty(prefix = "spring.ai.mcp.client", name = "enabled", havingValue = "true")
 public class McpClientConfig {
 
     private static final Logger log = LoggerFactory.getLogger(McpClientConfig.class);
