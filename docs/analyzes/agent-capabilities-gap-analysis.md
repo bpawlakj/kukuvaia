@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-06
 **Context:** Kukuvaia operates on **documents** (outlines, content items, classifications), not source code. The same rigor and patterns apply — documents deserve the same quality gates as code.
-**Implementation plan:** `docs/plan/kukuvaia-implementation-plan.md` (derived from this analysis)
+**Implementation plan:** `docs/architecture/implementation-plan.md` (derived from this analysis)
 **Sources:** Gap analysis (original), Teacher Assistant (production comparison), Claude Code (internals)
 
 ## Current State

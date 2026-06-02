@@ -4,7 +4,6 @@ import ai.kukuvaia.agent.PlanningModeService;
 import ai.kukuvaia.agent.SessionEscalationService;
 import ai.kukuvaia.provider.service.ChatModelCache;
 import ai.kukuvaia.provider.service.ComplexityMappingService;
-import ai.kukuvaia.provider.repository.ModelRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -21,7 +20,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ModelRoutingAdvisorTest {
 
     @Mock private ChatModelCache chatModelCache;
-    @Mock private ModelRepository modelRepository;
     @Mock private PlanningModeService planningModeService;
     @Mock private JdbcTemplate jdbcTemplate;
     @Mock private ComplexityDetector complexityDetector;
@@ -32,7 +30,7 @@ class ModelRoutingAdvisorTest {
 
     @BeforeEach
     void setUp() {
-        advisor = new ModelRoutingAdvisor(chatModelCache, modelRepository,
+        advisor = new ModelRoutingAdvisor(chatModelCache,
                 new TaskClassifier(), planningModeService, jdbcTemplate,
                 complexityDetector, complexityMappingService,
                 new SessionEscalationService(), new SimpleMeterRegistry());

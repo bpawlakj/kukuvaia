@@ -3,7 +3,7 @@ package ai.kukuvaia.advisors;
 import ai.kukuvaia.memory.repository.ConversationSummaryRepository;
 import ai.kukuvaia.output.SessionOutputSink;
 import ai.kukuvaia.output.TextBlock;
-import ai.kukuvaia.provider.repository.ModelRepository;
+import ai.kukuvaia.provider.service.ChatModelCache;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -100,7 +100,7 @@ public class ContextCompactionAdvisor implements BaseAdvisor {
     private final Set<String> warnedMissingWindowModels = ConcurrentHashMap.newKeySet();
 
     private final TokenEstimator tokenEstimator;
-    private final ModelRepository modelRepository;
+    private final ChatModelCache chatModelCache;
     private final SessionOutputSink outputSink;
     private final ConversationSummariser summariser;
     private final ConversationSummaryRepository summaryRepository;
@@ -117,7 +117,7 @@ public class ContextCompactionAdvisor implements BaseAdvisor {
 
     public ContextCompactionAdvisor(
             TokenEstimator tokenEstimator,
-            ModelRepository modelRepository,
+            ChatModelCache chatModelCache,
             SessionOutputSink outputSink,
             ConversationSummariser summariser,
             ConversationSummaryRepository summaryRepository,
@@ -131,7 +131,7 @@ public class ContextCompactionAdvisor implements BaseAdvisor {
             @Value("${kukuvaia.context-compaction.tool-summaries-enabled:true}") boolean toolSummariesEnabled,
             @Value("${kukuvaia.context-compaction.tool-summaries-default-elision:true}") boolean toolSummariesDefaultElision) {
         this.tokenEstimator = tokenEstimator;
-        this.modelRepository = modelRepository;
+        this.chatModelCache = chatModelCache;
         this.outputSink = outputSink;
         this.summariser = summariser;
         this.summaryRepository = summaryRepository;
@@ -399,7 +399,7 @@ public class ContextCompactionAdvisor implements BaseAdvisor {
         String modelId = null;
         if (modelIdObj instanceof String mid && !mid.isBlank()) {
             modelId = mid;
-            window = modelRepository.findByModelId(mid)
+            window = chatModelCache.getModelRecord(mid)
                     .map(rec -> rec.contextWindow())
                     .orElse(null);
         }

@@ -107,9 +107,10 @@ services:
       PG_DSN: jdbc:postgresql://postgres:5432/kukuvaia
       PG_USER: kukuvaia
       PG_PASSWORD: kukuvaia
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.anthropic.com}
       LLM_API_KEY: ${LLM_API_KEY:-not-used}
-      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4.5}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Anthropic API key required}
       VALIDATION_ENGINE_TOKEN: phase2-test-token
       KUKUVAIA_SECURITY_DEV_MODE: "true"
     ports:

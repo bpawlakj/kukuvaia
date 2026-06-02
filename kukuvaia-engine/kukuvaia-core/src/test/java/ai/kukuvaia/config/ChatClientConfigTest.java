@@ -16,7 +16,6 @@ import ai.kukuvaia.memory.embedding.EmbeddingService;
 import ai.kukuvaia.memory.repository.SmartMemoryRepository;
 import ai.kukuvaia.provider.service.ProviderAuditLog;
 import ai.kukuvaia.provider.service.ChatModelCache;
-import ai.kukuvaia.provider.repository.ModelRepository;
 import ai.kukuvaia.security.DataMaskingAdvisor;
 import ai.kukuvaia.security.MaskingService;
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
@@ -48,7 +47,7 @@ class ChatClientConfigTest {
         var sanitizer = new ToolResultSanitizingAdvisor();
         var memoryAdvisor = new SmartMemoryAdvisor(mock(SmartMemoryRepository.class), mock(EmbeddingService.class), registry);
         var routingAdvisor = new ModelRoutingAdvisor(
-                mock(ChatModelCache.class), mock(ModelRepository.class),
+                mock(ChatModelCache.class),
                 new ai.kukuvaia.advisors.TaskClassifier(),
                 mock(PlanningModeService.class),
                 mock(org.springframework.jdbc.core.JdbcTemplate.class),

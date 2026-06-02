@@ -47,7 +47,7 @@ Koog's insight: hierarchical spans with conversation-level trace IDs (CreateAgen
 - **Enhancement A:** Session-scoped span attributes (kukuvaia.session.id, kukuvaia.provider on all spans)
 - **Enhancement B:** OTel context propagation in SubAgentFactory async tasks (parent-child span relationships preserved)
 
-See updated `docs/plan/P01-observability.md` for details.
+See updated `docs/work/001-observability/plan.md` for details.
 
 ### 3. History Compression Strategies → ADAPT
 Koog has 4 strategies: WholeHistory, FromLastNMessages(N), Chunked(N), RetrieveFactsFromHistory.
@@ -60,7 +60,7 @@ Kukuvaia already covers 3 of 4:
 
 **Action:** Implement P04 as designed + add adaptive summarization interval based on session length.
 
-See updated `docs/plan/P04-conversation-summarization.md` for details.
+See updated `docs/work/005-conversation-summarization/plan.md` for details.
 
 ## Implementation Priority
 
@@ -83,5 +83,5 @@ See updated `docs/plan/P04-conversation-summarization.md` for details.
 
 - Koog AI documentation: https://docs.koog.ai/
 - Spring AI integration page: https://docs.koog.ai/spring-ai-integration/
-- P01 observability plan: `docs/plan/P01-observability.md`
-- P04 conversation summarization plan: `docs/plan/P04-conversation-summarization.md`
+- P01 observability plan: `docs/work/001-observability/plan.md`
+- P04 conversation summarization plan: `docs/work/005-conversation-summarization/plan.md`

@@ -11,7 +11,7 @@ import ai.kukuvaia.output.OutputBlock;
 import ai.kukuvaia.output.SessionOutputSink;
 import ai.kukuvaia.output.TextBlock;
 import ai.kukuvaia.provider.model.ModelRecord;
-import ai.kukuvaia.provider.repository.ModelRepository;
+import ai.kukuvaia.provider.service.ChatModelCache;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +37,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 @ExtendWith(MockitoExtension.class)
 class ContextCompactionAdvisorTest {
 
-    @Mock private ModelRepository modelRepository;
+    @Mock private ChatModelCache chatModelCache;
     @Mock private SessionOutputSink outputSink;
     @Mock private AdvisorChain chain;
     @Mock private ConversationSummariser summariser;
@@ -49,7 +49,7 @@ class ContextCompactionAdvisorTest {
     /** Build the advisor with a small default window so we don't need 200K-token fixtures. */
     private ContextCompactionAdvisor advisor(int defaultWindow, int safetyMargin, int keepLastTurns) {
         return new ContextCompactionAdvisor(
-                tokenEstimator, modelRepository, outputSink, summariser, summaryRepository, registry,
+                tokenEstimator, chatModelCache, outputSink, summariser, summaryRepository, registry,
                 /* enabled */ true, defaultWindow, safetyMargin, keepLastTurns,
                 /* summarisationEnabled */ false, /* summarisationKeepLastTurns */ 4,
                 /* toolSummariesEnabled */ false, /* toolSummariesDefaultElision */ false);
@@ -59,7 +59,7 @@ class ContextCompactionAdvisorTest {
     private ContextCompactionAdvisor advisorWithPhaseD(int defaultWindow, int safetyMargin,
             int keepLastTurns, int summarisationKeepLastTurns) {
         return new ContextCompactionAdvisor(
-                tokenEstimator, modelRepository, outputSink, summariser, summaryRepository, registry,
+                tokenEstimator, chatModelCache, outputSink, summariser, summaryRepository, registry,
                 /* enabled */ true, defaultWindow, safetyMargin, keepLastTurns,
                 /* summarisationEnabled */ true, summarisationKeepLastTurns,
                 /* toolSummariesEnabled */ false, /* toolSummariesDefaultElision */ false);
@@ -69,7 +69,7 @@ class ContextCompactionAdvisorTest {
     private ContextCompactionAdvisor advisorWithPhaseC(int defaultWindow, int safetyMargin,
             int keepLastTurns, boolean defaultElision) {
         return new ContextCompactionAdvisor(
-                tokenEstimator, modelRepository, outputSink, summariser, summaryRepository, registry,
+                tokenEstimator, chatModelCache, outputSink, summariser, summaryRepository, registry,
                 /* enabled */ true, defaultWindow, safetyMargin, keepLastTurns,
                 /* summarisationEnabled */ false, /* summarisationKeepLastTurns */ 4,
                 /* toolSummariesEnabled */ true, defaultElision);
@@ -222,7 +222,7 @@ class ContextCompactionAdvisorTest {
         // Default in advisor: 200k. We pass 1M-tier window via the model record so the
         // exact same fixture that previously overflowed should now pass through.
         var a = advisor(200, 5, 1);
-        when(modelRepository.findByModelId("opus-1m"))
+        when(chatModelCache.getModelRecord("opus-1m"))
                 .thenReturn(Optional.of(modelRecord("opus-1m", 1_000_000)));
 
         List<Message> msgs = new ArrayList<>();
@@ -597,7 +597,7 @@ class ContextCompactionAdvisorTest {
     @DisplayName("disabled — pass-through even when over cap")
     void disabled_passesThrough() {
         var a = new ContextCompactionAdvisor(
-                tokenEstimator, modelRepository, outputSink, summariser, summaryRepository, registry,
+                tokenEstimator, chatModelCache, outputSink, summariser, summaryRepository, registry,
                 /* enabled */ false, 100, 5, 0,
                 /* summarisationEnabled */ false, 4,
                 /* toolSummariesEnabled */ false, false);

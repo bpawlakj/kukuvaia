@@ -49,6 +49,33 @@ kukuvaia:
     # relevant state exists).
     verbosity: ${KUKUVAIA_SUPERVISOR_VERBOSITY:FULL}
 
+  # ── File-based LLM provider / model / role configuration ────────────────────
+  # Replaces the DB-backed providers/models/model_roles tables.
+  # apiKeyRef: use an env-var name (e.g. ANTHROPIC_API_KEY) or a literal key.
+  # Roles map routing-role names to modelId strings defined in providers[].models[].
+  llm-providers:
+    providers:
+      - name: ${PROVIDER_NAME:anthropic}
+        type: ${PROVIDER_TYPE:anthropic}
+        baseUrl: ${LLM_BASE_URL:https://api.anthropic.com}
+        apiKeyRef: ${ANTHROPIC_API_KEY:}
+        enabled: true
+        config:
+          # Anthropic native API uses x-api-key header, not Authorization: Bearer.
+          auth-header: x-api-key
+          headers:
+            anthropic-version: "2023-06-01"
+        models:
+          - modelId: ${LLM_MODEL:claude-sonnet-4-6}
+            displayName: ${LLM_MODEL_DISPLAY:Claude Sonnet 4.6}
+            tier: ${LLM_MODEL_TIER:standard}
+            maxTokens: ${LLM_MAX_TOKENS:8096}
+            capabilities: [chat, tools]
+    roles:
+      supervisor: ${LLM_MODEL:claude-sonnet-4-6}
+      advisor: ${LLM_MODEL:claude-sonnet-4-6}
+      worker: ${LLM_MODEL:claude-sonnet-4-6}
+
 spring:
   application:
     name: kukuvaia-engine

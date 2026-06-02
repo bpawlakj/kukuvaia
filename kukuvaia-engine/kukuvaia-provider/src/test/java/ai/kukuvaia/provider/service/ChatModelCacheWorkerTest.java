@@ -1,5 +1,7 @@
 package ai.kukuvaia.provider.service;
 
+import ai.kukuvaia.provider.config.LlmProvidersProperties;
+import ai.kukuvaia.provider.secret.SecretResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -8,132 +10,94 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.model.ChatModel;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-import ai.kukuvaia.provider.model.ModelRecord;
-import ai.kukuvaia.provider.repository.ModelRepository;
-import ai.kukuvaia.provider.model.ModelRoleRecord;
-import ai.kukuvaia.provider.repository.ModelRoleRepository;
-import ai.kukuvaia.provider.model.ProviderRecord;
-import ai.kukuvaia.provider.repository.ProviderRepository;
 
-@DisplayName("ChatModelCache — getWorkerModels round-robin support")
+@DisplayName("ChatModelCache — getWorkerModels multi-worker support")
 @ExtendWith(MockitoExtension.class)
 class ChatModelCacheWorkerTest {
 
     @Mock private ChatModelFactory chatModelFactory;
-    @Mock private ProviderRepository providerRepository;
-    @Mock private ModelRepository modelRepository;
-    @Mock private ModelRoleRepository modelRoleRepository;
-    @Mock private ChatModel mockModel;
-
-    private ChatModelCache cache;
-
-    private final UUID providerId = UUID.randomUUID();
+    @Mock private SecretResolver secretResolver;
 
     @BeforeEach
     void setUp() {
-        cache = new ChatModelCache(chatModelFactory, providerRepository, modelRepository, modelRoleRepository);
+        lenient().when(secretResolver.resolve(any())).thenReturn("resolved-key");
     }
 
-    private ProviderRecord testProvider() {
-        return new ProviderRecord(providerId, "test", "custom",
-                "https://api.test.com", "TEST_KEY",
-                true, 0, Map.of(), Instant.now(), Instant.now());
+    private LlmProvidersProperties buildMultiWorkerProps() {
+        LlmProvidersProperties props = new LlmProvidersProperties();
+
+        LlmProvidersProperties.ProviderDef pd = new LlmProvidersProperties.ProviderDef();
+        pd.setName("test"); pd.setType("anthropic");
+        pd.setBaseUrl("https://api.test.com"); pd.setApiKeyRef("TEST_KEY");
+        pd.setEnabled(true);
+
+        LlmProvidersProperties.ModelDef m1 = new LlmProvidersProperties.ModelDef();
+        m1.setModelId("haiku"); m1.setMaxTokens(4096);
+
+        LlmProvidersProperties.ModelDef m2 = new LlmProvidersProperties.ModelDef();
+        m2.setModelId("sonnet"); m2.setMaxTokens(8192);
+
+        pd.setModels(List.of(m1, m2));
+        props.setProviders(List.of(pd));
+        props.setRoles(Map.of("worker", "haiku", "worker-2", "sonnet", "supervisor", "sonnet"));
+        return props;
     }
 
-    private ModelRecord model(UUID id, String name) {
-        return new ModelRecord(id, providerId, name, name,
-                List.of("text"), "economy", 4096, 200000,
-                true, Map.of(), null, Instant.now(), Instant.now());
-    }
+    @Test
+    @DisplayName("getWorkerModels — returns models for worker and worker-N roles")
+    void getWorkerModels_returnsAllWorkers() {
+        ChatModel haikuModel = mock(ChatModel.class);
+        ChatModel sonnetModel = mock(ChatModel.class);
 
-    private ModelRoleRecord role(String roleName, UUID modelId) {
-        return new ModelRoleRecord(UUID.randomUUID(), roleName, modelId, null, Instant.now(), Instant.now());
-    }
-
-    private void stubResolveAnyModel() {
-        when(modelRepository.findById(any())).thenAnswer(inv -> {
-            UUID id = inv.getArgument(0);
-            return Optional.of(model(id, "model-" + id.toString().substring(0, 4)));
+        when(chatModelFactory.create(any(), any())).thenAnswer(inv -> {
+            ai.kukuvaia.provider.model.ModelRecord model = inv.getArgument(1);
+            return model.modelId().equals("haiku") ? haikuModel : sonnetModel;
         });
-        when(providerRepository.findById(any())).thenReturn(Optional.of(testProvider()));
-        when(chatModelFactory.create(any(ProviderRecord.class), any(ModelRecord.class))).thenReturn(mockModel);
+
+        var cache = new ChatModelCache(chatModelFactory, buildMultiWorkerProps(), secretResolver);
+        cache.warmUp();
+
+        List<ChatModel> workers = cache.getWorkerModels();
+        assertThat(workers).hasSize(2).contains(haikuModel, sonnetModel);
     }
 
     @Test
-    @DisplayName("getWorkerModels — returns all worker-* roles")
-    void getWorkerModels_returnsAllWorkerRoles() {
-        UUID wId = UUID.randomUUID();
-        UUID w2Id = UUID.randomUUID();
-        UUID sId = UUID.randomUUID();
+    @DisplayName("getWorkerModels — excludes non-worker roles (e.g. supervisor)")
+    void getWorkerModels_excludesSupervisor() {
+        when(chatModelFactory.create(any(), any())).thenReturn(mock(ChatModel.class));
 
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("worker", wId), role("worker-2", w2Id), role("supervisor", sId)
-        ));
-        cache.refreshRoles();
-        stubResolveAnyModel();
+        var cache = new ChatModelCache(chatModelFactory, buildMultiWorkerProps(), secretResolver);
+        cache.warmUp();
 
-        List<ChatModel> workers = cache.getWorkerModels();
-
-        // worker + worker-2, NOT supervisor
-        assertThat(workers).hasSize(2);
+        // 3 roles: supervisor + worker + worker-2; only 2 are "worker*"
+        assertThat(cache.getWorkerModels()).hasSize(2);
     }
 
     @Test
-    @DisplayName("getWorkerModels — single worker returns single-element list")
-    void getWorkerModels_singleWorker_returnsSingle() {
-        UUID wId = UUID.randomUUID();
-        UUID aId = UUID.randomUUID();
+    @DisplayName("getWorkerModels — empty when no worker role configured")
+    void getWorkerModels_empty_whenNoWorkerRole() {
+        LlmProvidersProperties props = new LlmProvidersProperties();
+        LlmProvidersProperties.ProviderDef pd = new LlmProvidersProperties.ProviderDef();
+        pd.setName("p"); pd.setType("anthropic");
+        pd.setBaseUrl("http://x"); pd.setApiKeyRef("KEY"); pd.setEnabled(true);
+        LlmProvidersProperties.ModelDef md = new LlmProvidersProperties.ModelDef();
+        md.setModelId("m"); md.setMaxTokens(4096);
+        pd.setModels(List.of(md));
+        props.setProviders(List.of(pd));
+        props.setRoles(Map.of("supervisor", "m")); // no worker role
 
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("worker", wId), role("advisor", aId)
-        ));
-        cache.refreshRoles();
-        stubResolveAnyModel();
+        when(chatModelFactory.create(any(), any())).thenReturn(mock(ChatModel.class));
+        var cache = new ChatModelCache(chatModelFactory, props, secretResolver);
+        cache.warmUp();
 
-        List<ChatModel> workers = cache.getWorkerModels();
-
-        assertThat(workers).hasSize(1);
-    }
-
-    @Test
-    @DisplayName("getWorkerModels — no workers returns empty list")
-    void getWorkerModels_noWorkers_returnsEmpty() {
-        UUID sId = UUID.randomUUID();
-
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("supervisor", sId)
-        ));
-        cache.refreshRoles();
-
-        List<ChatModel> workers = cache.getWorkerModels();
-
-        assertThat(workers).isEmpty();
-    }
-
-    @Test
-    @DisplayName("getWorkerModels — worker-3 pattern included")
-    void getWorkerModels_worker3_included() {
-        UUID w1 = UUID.randomUUID();
-        UUID w2 = UUID.randomUUID();
-        UUID w3 = UUID.randomUUID();
-
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("worker", w1), role("worker-2", w2), role("worker-3", w3)
-        ));
-        cache.refreshRoles();
-        stubResolveAnyModel();
-
-        List<ChatModel> workers = cache.getWorkerModels();
-
-        assertThat(workers).hasSize(3);
+        assertThat(cache.getWorkerModels()).isEmpty();
     }
 }

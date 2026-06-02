@@ -1,27 +1,20 @@
 package ai.kukuvaia.dream;
 
-import ai.kukuvaia.provider.model.*;
-import ai.kukuvaia.provider.repository.*;
-import ai.kukuvaia.provider.service.*;
-import ai.kukuvaia.provider.secret.*;
-import ai.kukuvaia.provider.dto.*;
-import ai.kukuvaia.provider.transport.*;
+import ai.kukuvaia.provider.config.LlmProvidersProperties;
+import ai.kukuvaia.provider.secret.SecretResolver;
+import ai.kukuvaia.provider.service.ChatModelCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
-import ai.kukuvaia.provider.repository.ModelRepository;
-import ai.kukuvaia.provider.repository.ModelRoleRepository;
-import ai.kukuvaia.provider.repository.ProviderRepository;
-import ai.kukuvaia.provider.secret.SecretResolver;
 
 /**
  * Orchestrates dream runs: deterministic health checks, config audits,
  * and produces reports with recommendations.
  *
  * Phase A: deterministic tasks (no LLM) — health check + config audit.
- * Phase B+: LLM-powered tasks added in T14 (memory consolidation, model scout).
+ * Config is read from {@link LlmProvidersProperties} (file-based) instead of the DB.
  */
 @Service
 public class DreamService {
@@ -30,144 +23,138 @@ public class DreamService {
 
     private final DreamReportRepository reportRepository;
     private final DreamRecommendationRepository recommendationRepository;
-    private final ProviderRepository providerRepository;
-    private final ModelRepository modelRepository;
-    private final ModelRoleRepository modelRoleRepository;
+    private final LlmProvidersProperties providersProperties;
+    private final ChatModelCache chatModelCache;
     private final SecretResolver secretResolver;
 
     public DreamService(DreamReportRepository reportRepository,
                         DreamRecommendationRepository recommendationRepository,
-                        ProviderRepository providerRepository,
-                        ModelRepository modelRepository,
-                        ModelRoleRepository modelRoleRepository,
+                        LlmProvidersProperties providersProperties,
+                        ChatModelCache chatModelCache,
                         SecretResolver secretResolver) {
         this.reportRepository = reportRepository;
         this.recommendationRepository = recommendationRepository;
-        this.providerRepository = providerRepository;
-        this.modelRepository = modelRepository;
-        this.modelRoleRepository = modelRoleRepository;
+        this.providersProperties = providersProperties;
+        this.chatModelCache = chatModelCache;
         this.secretResolver = secretResolver;
     }
 
-    /**
-     * Run a dream cycle: health check + config audit.
-     * Returns the report ID.
-     */
     public UUID runDream() {
         DreamReportRecord report = reportRepository.create();
         UUID reportId = report.id();
         log.info("Dream run started: {}", reportId);
 
         try {
-            var healthSnapshot = new LinkedHashMap<String, Object>();
+            var snapshot = new LinkedHashMap<String, Object>();
             var recommendations = new ArrayList<DreamRecommendation>();
 
-            // Task 1: Health check (deterministic, no LLM)
-            healthCheck(healthSnapshot, recommendations);
-
-            // Task 2: Config audit (deterministic, no LLM)
+            healthCheck(snapshot, recommendations);
             configAudit(recommendations);
 
-            // Save recommendations
+            snapshot.put("recommendationCount", recommendations.size());
+            reportRepository.complete(reportId,
+                    "Dream run: %d recommendations".formatted(recommendations.size()),
+                    0, List.of(), snapshot);
+
             for (var rec : recommendations) {
-                recommendationRepository.save(reportId, rec.type, rec.priority,
-                        rec.description, rec.suggestedAction, rec.confidence, rec.evidence);
+                recommendationRepository.save(reportId,
+                        rec.type(), rec.priority(), rec.description(),
+                        rec.suggestedAction(), rec.confidence(), rec.evidence());
             }
-
-            String summary = "Dream completed: %d checks, %d recommendations".formatted(
-                    healthSnapshot.size(), recommendations.size());
-
-            reportRepository.complete(reportId, summary, 0, List.of(), healthSnapshot);
-            log.info("Dream run completed: {} — {}", reportId, summary);
-
+            log.info("Dream run completed: {} recommendations", recommendations.size());
         } catch (Exception e) {
-            log.error("Dream run failed: {}", reportId, e);
+            log.error("Dream run failed: {}", e.getMessage(), e);
             reportRepository.fail(reportId, e.getMessage());
         }
 
         return reportId;
     }
 
-    /**
-     * Health check: verify providers, API keys, model availability.
-     */
     void healthCheck(Map<String, Object> snapshot, List<DreamRecommendation> recommendations) {
-        var providers = providerRepository.findAll();
-        snapshot.put("providerCount", providers.size());
+        var providers = providersProperties.getProviders();
+        int providerCount = providers != null ? providers.size() : 0;
+        snapshot.put("providerCount", providerCount);
+
+        if (providers == null || providers.isEmpty()) {
+            recommendations.add(new DreamRecommendation(
+                    "CONFIG_INCONSISTENCY", "critical",
+                    "No providers configured",
+                    "Add provider to kukuvaia.llm-providers in application.yaml",
+                    0.99, Map.of()
+            ));
+            return;
+        }
 
         for (var provider : providers) {
             var providerHealth = new LinkedHashMap<String, Object>();
-            providerHealth.put("name", provider.name());
-            providerHealth.put("type", provider.type());
-            providerHealth.put("enabled", provider.enabled());
+            providerHealth.put("name", provider.getName());
+            providerHealth.put("type", provider.getType());
+            providerHealth.put("enabled", provider.isEnabled());
 
-            // Check API key
             try {
-                secretResolver.resolve(provider.apiKeyRef());
+                secretResolver.resolve(provider.getApiKeyRef());
                 providerHealth.put("apiKeyStatus", "ok");
             } catch (SecretResolver.SecretNotFoundException e) {
                 providerHealth.put("apiKeyStatus", "missing");
                 recommendations.add(new DreamRecommendation(
                         "CONFIG_INCONSISTENCY", "high",
-                        "API key '%s' not found for provider '%s'".formatted(provider.apiKeyRef(), provider.name()),
-                        "Set environment variable: " + provider.apiKeyRef(),
-                        0.95, Map.of("provider", provider.name())
+                        "API key '%s' not found for provider '%s'".formatted(provider.getApiKeyRef(), provider.getName()),
+                        "Set environment variable or literal key in kukuvaia.llm-providers.providers[].apiKeyRef",
+                        0.95, Map.of("provider", provider.getName())
                 ));
             }
 
-            // Check model count
-            long modelCount = modelRepository.countByProviderId(provider.id());
+            int modelCount = provider.getModels() != null ? provider.getModels().size() : 0;
             providerHealth.put("modelCount", modelCount);
-            if (modelCount == 0 && provider.enabled()) {
+            if (modelCount == 0 && provider.isEnabled()) {
                 recommendations.add(new DreamRecommendation(
                         "CONFIG_INCONSISTENCY", "medium",
-                        "Provider '%s' has no models configured".formatted(provider.name()),
-                        "POST /api/providers/%s/sync-models".formatted(provider.id()),
-                        0.8, Map.of("provider", provider.name())
+                        "Provider '%s' has no models configured".formatted(provider.getName()),
+                        "Add models under kukuvaia.llm-providers.providers[].models[] in application.yaml",
+                        0.8, Map.of("provider", provider.getName())
                 ));
             }
 
-            snapshot.put("provider:" + provider.name(), providerHealth);
+            snapshot.put("provider:" + provider.getName(), providerHealth);
         }
     }
 
-    /**
-     * Config audit: verify role assignments, orphaned roles, critical roles present.
-     */
     void configAudit(List<DreamRecommendation> recommendations) {
-        var roles = modelRoleRepository.findAll();
+        var roles = providersProperties.getRoles();
         var criticalRoles = Set.of("supervisor", "worker", "advisor");
         var assignedRoles = new HashSet<String>();
 
-        for (var role : roles) {
-            assignedRoles.add(role.role());
+        if (roles != null) {
+            for (var entry : roles.entrySet()) {
+                String roleName = entry.getKey();
+                String modelId = entry.getValue();
+                assignedRoles.add(roleName);
 
-            // Check if model exists and is enabled
-            var model = modelRepository.findById(role.modelId());
-            if (model.isEmpty()) {
-                recommendations.add(new DreamRecommendation(
-                        "CONFIG_INCONSISTENCY", "critical",
-                        "Role '%s' points to non-existent model %s".formatted(role.role(), role.modelId()),
-                        "DELETE /api/models/roles/" + role.role(),
-                        0.99, Map.of("role", role.role())
-                ));
-            } else if (!model.get().enabled()) {
-                recommendations.add(new DreamRecommendation(
-                        "CONFIG_INCONSISTENCY", "high",
-                        "Role '%s' points to disabled model '%s'".formatted(role.role(), model.get().modelId()),
-                        "Re-enable model or reassign role",
-                        0.9, Map.of("role", role.role(), "model", model.get().modelId())
-                ));
+                var model = chatModelCache.getModelRecord(modelId);
+                if (model.isEmpty()) {
+                    recommendations.add(new DreamRecommendation(
+                            "CONFIG_INCONSISTENCY", "critical",
+                            "Role '%s' references unknown modelId '%s'".formatted(roleName, modelId),
+                            "Fix kukuvaia.llm-providers.roles.%s in application.yaml".formatted(roleName),
+                            0.99, Map.of("role", roleName, "modelId", modelId)
+                    ));
+                } else if (!model.get().enabled()) {
+                    recommendations.add(new DreamRecommendation(
+                            "CONFIG_INCONSISTENCY", "high",
+                            "Role '%s' points to disabled model '%s'".formatted(roleName, model.get().modelId()),
+                            "Re-enable model in application.yaml or reassign role",
+                            0.9, Map.of("role", roleName, "model", model.get().modelId())
+                    ));
+                }
             }
         }
 
-        // Check critical roles
         for (String critical : criticalRoles) {
             if (!assignedRoles.contains(critical)) {
                 recommendations.add(new DreamRecommendation(
                         "CONFIG_INCONSISTENCY", "medium",
                         "Critical role '%s' is not assigned to any model".formatted(critical),
-                        "POST /api/models/roles with role=%s".formatted(critical),
+                        "Add '%s' to kukuvaia.llm-providers.roles in application.yaml".formatted(critical),
                         0.85, Map.of("role", critical)
                 ));
             }
@@ -176,33 +163,13 @@ public class DreamService {
 
     // --- Query methods ---
 
-    public Optional<DreamReportRecord> getReport(UUID id) {
-        return reportRepository.findById(id);
-    }
-
-    public Optional<DreamReportRecord> getLatestReport() {
-        return reportRepository.findLatest();
-    }
-
-    public List<DreamReportRecord> listReports(int limit) {
-        return reportRepository.findAll(limit);
-    }
-
-    public List<DreamRecommendationRecord> getRecommendations(UUID reportId) {
-        return recommendationRepository.findByReportId(reportId);
-    }
-
-    public List<DreamRecommendationRecord> getPendingRecommendations() {
-        return recommendationRepository.findPending();
-    }
-
-    public boolean acceptRecommendation(UUID id, String resolvedBy) {
-        return recommendationRepository.accept(id, resolvedBy) > 0;
-    }
-
-    public boolean rejectRecommendation(UUID id, String resolvedBy, String reason) {
-        return recommendationRepository.reject(id, resolvedBy, reason) > 0;
-    }
+    public Optional<DreamReportRecord> getReport(UUID id) { return reportRepository.findById(id); }
+    public Optional<DreamReportRecord> getLatestReport() { return reportRepository.findLatest(); }
+    public List<DreamReportRecord> listReports(int limit) { return reportRepository.findAll(limit); }
+    public List<DreamRecommendationRecord> getRecommendations(UUID reportId) { return recommendationRepository.findByReportId(reportId); }
+    public List<DreamRecommendationRecord> getPendingRecommendations() { return recommendationRepository.findPending(); }
+    public boolean acceptRecommendation(UUID id, String resolvedBy) { return recommendationRepository.accept(id, resolvedBy) > 0; }
+    public boolean rejectRecommendation(UUID id, String resolvedBy, String reason) { return recommendationRepository.reject(id, resolvedBy, reason) > 0; }
 
     record DreamRecommendation(String type, String priority, String description,
                                String suggestedAction, double confidence, Map<String, Object> evidence) {}

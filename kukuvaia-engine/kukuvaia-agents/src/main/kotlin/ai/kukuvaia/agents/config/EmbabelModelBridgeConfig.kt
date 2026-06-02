@@ -1,7 +1,7 @@
 package ai.kukuvaia.agents.config
 
+import ai.kukuvaia.provider.config.LlmProvidersProperties
 import ai.kukuvaia.provider.service.ChatModelCache
-import ai.kukuvaia.provider.repository.ModelRoleRepository
 import com.embabel.common.ai.model.*
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.model.ChatModel
@@ -9,36 +9,27 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 
 /**
- * Bridges kukuvaia's DB-backed model registry to Embabel's ModelProvider.
+ * Bridges kukuvaia's config-backed model registry to Embabel's ModelProvider.
  *
  * Uses [KukuvaiaModelProvider] — a custom ModelProvider that:
- * - Starts empty (no models at boot — user hasn't registered any yet)
- * - Gets refreshed when providers/models are registered via API
- * - Does NOT crash on startup like ConfigurableModelProvider does with empty state
+ * - Starts with models from [ChatModelCache] (populated at startup from application.yaml)
+ * - Does NOT crash on startup with empty state
  *
  * Lifecycle:
- * 1. App boots → KukuvaiaModelProvider created empty (or with fallback ChatModel)
- * 2. User registers provider + models via /api/providers, /api/models
- * 3. User assigns roles via /api/models/roles
- * 4. ChatModelCache.warmUp() or manual refresh → KukuvaiaModelProvider.refresh()
- * 5. Embabel agents can now use ctx.ai().withLlmByRole("cheapest")
+ * 1. App boots → ChatModelCache.warmUp() populates the cache from LlmProvidersProperties
+ * 2. This config reads roles from LlmProvidersProperties and models from ChatModelCache
+ * 3. Embabel agents can use ctx.ai().withLlmByRole("cheapest")
  */
 @Configuration
 class EmbabelModelBridgeConfig(
     private val chatModelCache: ChatModelCache,
-    private val modelRoleRepository: ModelRoleRepository,
+    private val providersProperties: LlmProvidersProperties,
 ) {
 
     private val log = LoggerFactory.getLogger(EmbabelModelBridgeConfig::class.java)
 
-    /**
-     * The only ModelProvider in the context.
-     * Embabel's default modelProvider is removed by EmbabelBeanOverride.
-     * Starts with supervisor model from cache (or null if DB empty), refreshed at startup.
-     */
     @Bean
     fun kukuvaiaModelProvider(): KukuvaiaModelProvider {
-        // Use supervisor from cache as fallback — avoids injecting @Primary RoutingChatModel
         val supervisorModel = chatModelCache.getByRole("supervisor")
         val fallbackLlm = if (supervisorModel != null) {
             createLlm("fallback", supervisorModel)
@@ -46,21 +37,14 @@ class EmbabelModelBridgeConfig(
             null
         }
         val provider = KukuvaiaModelProvider(fallbackLlm)
-
-        // Try to load from DB (may be empty on first boot)
         refreshProvider(provider)
-
         return provider
     }
 
-    /**
-     * Reload models from DB into the ModelProvider.
-     * Called at startup and can be called again after provider/model registration.
-     */
     fun refreshProvider(provider: KukuvaiaModelProvider) {
-        val roles = modelRoleRepository.findAll()
-        if (roles.isEmpty()) {
-            log.info("No DB model roles found — Embabel using fallback ChatModel")
+        val roles = providersProperties.roles
+        if (roles.isNullOrEmpty()) {
+            log.info("No roles configured in llm-providers — Embabel using fallback ChatModel")
             return
         }
 
@@ -68,21 +52,19 @@ class EmbabelModelBridgeConfig(
         val roleMap = mutableMapOf<String, String>()
         var defaultLlmName: String? = null
 
-        for (role in roles) {
+        for ((roleName, _) in roles) {
             try {
-                val chatModel = chatModelCache.getByModelId(role.modelId())
-                val llmName = role.role()
+                val chatModel = chatModelCache.getByRole(roleName) ?: continue
+                llms.add(createLlm(roleName, chatModel))
 
-                llms.add(createLlm(llmName, chatModel))
-
-                when (role.role()) {
-                    "worker", "cheapest" -> roleMap[ModelProvider.CHEAPEST_ROLE] = llmName
-                    "advisor", "powerful", "best" -> roleMap[ModelProvider.BEST_ROLE] = llmName
-                    "supervisor" -> defaultLlmName = llmName
+                when (roleName) {
+                    "worker", "cheapest" -> roleMap[ModelProvider.CHEAPEST_ROLE] = roleName
+                    "advisor", "powerful", "best" -> roleMap[ModelProvider.BEST_ROLE] = roleName
+                    "supervisor" -> defaultLlmName = roleName
                 }
-                roleMap[role.role()] = llmName
+                roleMap[roleName] = roleName
             } catch (e: Exception) {
-                log.warn("Failed to create Embabel Llm for role '{}': {}", role.role(), e.message)
+                log.warn("Failed to create Embabel Llm for role '{}': {}", roleName, e.message)
             }
         }
 
@@ -99,12 +81,6 @@ class EmbabelModelBridgeConfig(
 
 /**
  * ModelProvider that tolerates empty state and supports runtime updates.
- * Unlike ConfigurableModelProvider, this does NOT throw when no models are configured.
- */
-/**
- * ModelProvider that tolerates empty state and supports runtime updates.
- * Uses a simple map-based lookup instead of ConfigurableModelProvider
- * (which has a ClassCastException bug in Embabel 0.3.4).
  */
 class KukuvaiaModelProvider(
     private val fallbackLlm: Llm?,
@@ -112,18 +88,10 @@ class KukuvaiaModelProvider(
 
     private val log = LoggerFactory.getLogger(KukuvaiaModelProvider::class.java)
 
-    @Volatile
-    private var llmsByName: Map<String, Llm> = emptyMap()
+    @Volatile private var llmsByName: Map<String, Llm> = emptyMap()
+    @Volatile private var roleMap: Map<String, String> = emptyMap()
+    @Volatile private var defaultLlmName: String? = null
 
-    @Volatile
-    private var roleMap: Map<String, String> = emptyMap()
-
-    @Volatile
-    private var defaultLlmName: String? = null
-
-    /**
-     * Replace the model set at runtime. Thread-safe via volatile reference swap.
-     */
     fun updateModels(llms: List<Llm>, roles: Map<String, String>, defaultLlm: String) {
         llmsByName = llms.associateBy { it.name }
         roleMap = roles
@@ -137,31 +105,18 @@ class KukuvaiaModelProvider(
             throw NoSuitableModelException(criteria, emptyList())
         }
 
-        // Try role-based lookup
         if (criteria is ByRoleModelSelectionCriteria) {
             val roleName = criteria.role
             val mappedName = roleMap[roleName]
-            if (mappedName != null) {
-                val llm = models[mappedName]
-                if (llm != null) return llm
-            }
-            val direct = models[roleName]
-            if (direct != null) return direct
+            if (mappedName != null) { models[mappedName]?.let { return it } }
+            models[roleName]?.let { return it }
         }
 
-        // Try name-based lookup
         if (criteria is ByNameModelSelectionCriteria) {
-            val llm = models[criteria.name]
-            if (llm != null) return llm
+            models[criteria.name]?.let { return it }
         }
 
-        // Fallback to default
-        val defName = defaultLlmName
-        if (defName != null) {
-            val defLlm = models[defName]
-            if (defLlm != null) return defLlm
-        }
-
+        defaultLlmName?.let { models[it]?.let { llm -> return llm } }
         return models.values.first()
     }
 
@@ -169,21 +124,15 @@ class KukuvaiaModelProvider(
         throw NoSuitableModelException(criteria, emptyList())
     }
 
-    override fun listRoles(type: Class<out AiModel<*>>): List<String> {
-        return roleMap.keys.toList().ifEmpty { listOf("fallback") }
-    }
+    override fun listRoles(type: Class<out AiModel<*>>): List<String> =
+        roleMap.keys.toList().ifEmpty { listOf("fallback") }
 
-    override fun listModelNames(type: Class<out AiModel<*>>): List<String> {
-        return llmsByName.keys.toList().ifEmpty { listOf("fallback") }
-    }
+    override fun listModelNames(type: Class<out AiModel<*>>): List<String> =
+        llmsByName.keys.toList().ifEmpty { listOf("fallback") }
 
     override fun listModels(): List<ModelMetadata> = emptyList()
 
-    override fun infoString(verbose: Boolean?, indent: Int): String {
-        return if (llmsByName.isEmpty()) {
-            "KukuvaiaModelProvider (no models configured — register a provider first)"
-        } else {
-            "KukuvaiaModelProvider (${llmsByName.size} models, ${roleMap.size} roles)"
-        }
-    }
+    override fun infoString(verbose: Boolean?, indent: Int): String =
+        if (llmsByName.isEmpty()) "KukuvaiaModelProvider (no models configured)"
+        else "KukuvaiaModelProvider (${llmsByName.size} models, ${roleMap.size} roles)"
 }

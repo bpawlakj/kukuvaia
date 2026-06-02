@@ -1,11 +1,9 @@
 package ai.kukuvaia.dream;
 
-import ai.kukuvaia.provider.model.*;
-import ai.kukuvaia.provider.repository.*;
-import ai.kukuvaia.provider.service.*;
-import ai.kukuvaia.provider.secret.*;
-import ai.kukuvaia.provider.dto.*;
-import ai.kukuvaia.provider.transport.*;
+import ai.kukuvaia.provider.config.LlmProvidersProperties;
+import ai.kukuvaia.provider.model.ModelRecord;
+import ai.kukuvaia.provider.secret.SecretResolver;
+import ai.kukuvaia.provider.service.ChatModelCache;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -18,13 +16,6 @@ import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
-import ai.kukuvaia.provider.model.ModelRecord;
-import ai.kukuvaia.provider.repository.ModelRepository;
-import ai.kukuvaia.provider.model.ModelRoleRecord;
-import ai.kukuvaia.provider.repository.ModelRoleRepository;
-import ai.kukuvaia.provider.model.ProviderRecord;
-import ai.kukuvaia.provider.repository.ProviderRepository;
-import ai.kukuvaia.provider.secret.SecretResolver;
 
 @DisplayName("DreamService — health check and config audit")
 @ExtendWith(MockitoExtension.class)
@@ -32,44 +23,57 @@ class DreamServiceTest {
 
     @Mock private DreamReportRepository reportRepository;
     @Mock private DreamRecommendationRepository recommendationRepository;
-    @Mock private ProviderRepository providerRepository;
-    @Mock private ModelRepository modelRepository;
-    @Mock private ModelRoleRepository modelRoleRepository;
+    @Mock private ChatModelCache chatModelCache;
     @Mock private SecretResolver secretResolver;
 
     private DreamService service;
 
     @BeforeEach
     void setUp() {
-        service = new DreamService(reportRepository, recommendationRepository,
-                providerRepository, modelRepository, modelRoleRepository, secretResolver);
+        // Default providers with 1 provider, 1 model, valid API key
     }
 
-    private ProviderRecord provider(UUID id, String name) {
-        return new ProviderRecord(id, name, "smartgate", "https://llm.example.com",
-                "API_KEY", true, 0, Map.of(), Instant.now(), Instant.now());
+    private LlmProvidersProperties buildProps(List<String> roles, boolean withModels, String apiKeyRef) {
+        LlmProvidersProperties props = new LlmProvidersProperties();
+
+        LlmProvidersProperties.ProviderDef pd = new LlmProvidersProperties.ProviderDef();
+        pd.setName("test-provider");
+        pd.setType("anthropic");
+        pd.setBaseUrl("https://api.example.com");
+        pd.setApiKeyRef(apiKeyRef);
+        pd.setEnabled(true);
+
+        if (withModels) {
+            LlmProvidersProperties.ModelDef md = new LlmProvidersProperties.ModelDef();
+            md.setModelId("sonnet");
+            md.setMaxTokens(4096);
+            pd.setModels(List.of(md));
+        } else {
+            pd.setModels(List.of());
+        }
+        props.setProviders(List.of(pd));
+
+        Map<String, String> roleMap = new HashMap<>();
+        for (String role : roles) roleMap.put(role, "sonnet");
+        props.setRoles(roleMap);
+        return props;
     }
 
-    private ModelRecord model(UUID id, UUID providerId, boolean enabled) {
-        return new ModelRecord(id, providerId, "sonnet", "Sonnet", List.of(), "standard",
-                4096, null, enabled, Map.of(), null, Instant.now(), Instant.now());
-    }
-
-    private ModelRoleRecord role(String roleName, UUID modelId) {
-        return new ModelRoleRecord(UUID.randomUUID(), roleName, modelId, null, Instant.now(), Instant.now());
+    private ModelRecord modelRecord(boolean enabled) {
+        return new ModelRecord(UUID.randomUUID(), UUID.randomUUID(), "sonnet", "Sonnet",
+                List.of(), "standard", 4096, null, enabled, Map.of(), null,
+                Instant.EPOCH, Instant.EPOCH);
     }
 
     @Test
     @DisplayName("healthCheck — all healthy → no recommendations")
     void healthCheck_allHealthy_noRecommendations() {
-        UUID providerId = UUID.randomUUID();
-        when(providerRepository.findAll()).thenReturn(List.of(provider(providerId, "smartgate")));
-        when(secretResolver.resolve("API_KEY")).thenReturn("valid-key");
-        when(modelRepository.countByProviderId(providerId)).thenReturn(3L);
+        var props = buildProps(List.of("supervisor", "worker", "advisor"), true, "VALID_KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(secretResolver.resolve("VALID_KEY")).thenReturn("actual-key");
 
         var snapshot = new LinkedHashMap<String, Object>();
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
-
         service.healthCheck(snapshot, recommendations);
 
         assertThat(recommendations).isEmpty();
@@ -79,14 +83,12 @@ class DreamServiceTest {
     @Test
     @DisplayName("healthCheck — missing API key → recommendation")
     void healthCheck_missingKey_recommendation() {
-        UUID providerId = UUID.randomUUID();
-        when(providerRepository.findAll()).thenReturn(List.of(provider(providerId, "smartgate")));
-        when(secretResolver.resolve("API_KEY")).thenThrow(new SecretResolver.SecretNotFoundException("API_KEY"));
-        when(modelRepository.countByProviderId(providerId)).thenReturn(1L);
+        var props = buildProps(List.of(), true, "MISSING_KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(secretResolver.resolve("MISSING_KEY")).thenThrow(new SecretResolver.SecretNotFoundException("MISSING_KEY"));
 
         var snapshot = new LinkedHashMap<String, Object>();
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
-
         service.healthCheck(snapshot, recommendations);
 
         assertThat(recommendations).hasSize(1);
@@ -97,14 +99,12 @@ class DreamServiceTest {
     @Test
     @DisplayName("healthCheck — provider with 0 models → recommendation")
     void healthCheck_noModels_recommendation() {
-        UUID providerId = UUID.randomUUID();
-        when(providerRepository.findAll()).thenReturn(List.of(provider(providerId, "empty")));
-        when(secretResolver.resolve("API_KEY")).thenReturn("valid-key");
-        when(modelRepository.countByProviderId(providerId)).thenReturn(0L);
+        var props = buildProps(List.of(), false, "VALID_KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(secretResolver.resolve("VALID_KEY")).thenReturn("actual-key");
 
         var snapshot = new LinkedHashMap<String, Object>();
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
-
         service.healthCheck(snapshot, recommendations);
 
         assertThat(recommendations).hasSize(1);
@@ -114,12 +114,9 @@ class DreamServiceTest {
     @Test
     @DisplayName("configAudit — all roles valid → no recommendations")
     void configAudit_allValid_noRecommendations() {
-        UUID modelId = UUID.randomUUID();
-        UUID providerId = UUID.randomUUID();
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("supervisor", modelId), role("worker", modelId), role("advisor", modelId)
-        ));
-        when(modelRepository.findById(modelId)).thenReturn(Optional.of(model(modelId, providerId, true)));
+        var props = buildProps(List.of("supervisor", "worker", "advisor"), true, "KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(chatModelCache.getModelRecord("sonnet")).thenReturn(Optional.of(modelRecord(true)));
 
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
         service.configAudit(recommendations);
@@ -130,12 +127,9 @@ class DreamServiceTest {
     @Test
     @DisplayName("configAudit — role points to disabled model → recommendation")
     void configAudit_disabledModel_recommendation() {
-        UUID modelId = UUID.randomUUID();
-        UUID providerId = UUID.randomUUID();
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("supervisor", modelId), role("worker", modelId), role("advisor", modelId)
-        ));
-        when(modelRepository.findById(modelId)).thenReturn(Optional.of(model(modelId, providerId, false)));
+        var props = buildProps(List.of("supervisor", "worker", "advisor"), true, "KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(chatModelCache.getModelRecord("sonnet")).thenReturn(Optional.of(modelRecord(false)));
 
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
         service.configAudit(recommendations);
@@ -147,23 +141,21 @@ class DreamServiceTest {
     @Test
     @DisplayName("configAudit — missing critical role → recommendation")
     void configAudit_missingCriticalRole_recommendation() {
-        when(modelRoleRepository.findAll()).thenReturn(List.of()); // no roles at all
+        var props = buildProps(List.of(), true, "KEY");  // no roles
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
 
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
         service.configAudit(recommendations);
 
-        // Should recommend supervisor, worker, advisor
         assertThat(recommendations).hasSizeGreaterThanOrEqualTo(3);
     }
 
     @Test
-    @DisplayName("configAudit — role points to non-existent model → critical recommendation")
-    void configAudit_nonExistentModel_critical() {
-        UUID missingModelId = UUID.randomUUID();
-        when(modelRoleRepository.findAll()).thenReturn(List.of(
-                role("supervisor", missingModelId), role("worker", missingModelId), role("advisor", missingModelId)
-        ));
-        when(modelRepository.findById(missingModelId)).thenReturn(Optional.empty());
+    @DisplayName("configAudit — role references unknown modelId → critical recommendation")
+    void configAudit_unknownModelId_critical() {
+        var props = buildProps(List.of("supervisor", "worker", "advisor"), true, "KEY");
+        service = new DreamService(reportRepository, recommendationRepository, props, chatModelCache, secretResolver);
+        when(chatModelCache.getModelRecord("sonnet")).thenReturn(Optional.empty());
 
         var recommendations = new ArrayList<DreamService.DreamRecommendation>();
         service.configAudit(recommendations);

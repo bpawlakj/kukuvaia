@@ -17,7 +17,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import ai.kukuvaia.provider.repository.ModelRepository;
 
 /**
  * JdbcTemplate-backed CRUD + similarity for {@code kukuvaia.agent_runs}.

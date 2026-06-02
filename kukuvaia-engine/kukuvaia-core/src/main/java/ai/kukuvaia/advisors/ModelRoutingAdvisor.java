@@ -3,8 +3,6 @@ package ai.kukuvaia.advisors;
 import ai.kukuvaia.agent.SessionEscalationService;
 import ai.kukuvaia.provider.service.ChatModelCache;
 import ai.kukuvaia.provider.service.ComplexityMappingService;
-import ai.kukuvaia.provider.model.ModelRecord;
-import ai.kukuvaia.provider.repository.ModelRepository;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -64,7 +62,6 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
     }
 
     private final ChatModelCache chatModelCache;
-    private final ModelRepository modelRepository;
     private final TaskClassifier taskClassifier;
     private final ai.kukuvaia.agent.PlanningModeService planningModeService;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
@@ -79,7 +76,7 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
     @Value("${kukuvaia.routing.shadow-mode:false}")
     private boolean shadowMode;
 
-    public ModelRoutingAdvisor(ChatModelCache chatModelCache, ModelRepository modelRepository,
+    public ModelRoutingAdvisor(ChatModelCache chatModelCache,
                                TaskClassifier taskClassifier,
                                ai.kukuvaia.agent.PlanningModeService planningModeService,
                                org.springframework.jdbc.core.JdbcTemplate jdbcTemplate,
@@ -88,7 +85,6 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
                                SessionEscalationService escalationService,
                                MeterRegistry meterRegistry) {
         this.chatModelCache = chatModelCache;
-        this.modelRepository = modelRepository;
         this.taskClassifier = taskClassifier;
         this.planningModeService = planningModeService;
         this.jdbcTemplate = jdbcTemplate;
@@ -135,10 +131,8 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
             return request;
         }
 
-        // Get actual model_id string (e.g., "haiku", "sonnet") from DB
-        String modelId = modelRepository.findById(modelUuid.get())
-                .map(ModelRecord::modelId)
-                .orElse(null);
+        // Resolve the modelId string (e.g., "claude-sonnet-4-6") from the config index
+        String modelId = chatModelCache.getModelIdString(modelUuid.get()).orElse(null);
         if (modelId == null) {
             log.debug("Model record not found for role '{}' — skipping", targetRole);
             return request;

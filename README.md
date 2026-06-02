@@ -344,7 +344,7 @@ The `validator` persona's whitelist is the read+record subset of the validation-
 ## Documentation
 
 - [`docs/architecture/`](docs/architecture/) — system design, memory architecture, Embabel integration
-- [`docs/plan/`](docs/plan/) — implementation plans by phase (P01 observability, P02 structured output, …)
+- [`docs/work/`](docs/work/) — implementation plans by phase (P01 observability, P02 structured output, …)
 - [`docs/analyzes/`](docs/analyzes/) — research and evaluations (Koog, model routing)
 - [`.maister/docs/`](.maister/docs/) — project vision, roadmap, standards (Maister workflow index)
 - [`CLAUDE.md`](CLAUDE.md) — high-level project map for AI-assisted development

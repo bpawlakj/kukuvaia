@@ -4,12 +4,9 @@ import ai.kukuvaia.dream.DreamRecommendationRecord;
 import ai.kukuvaia.dream.DreamReportRecord;
 import ai.kukuvaia.dream.DreamService;
 import ai.kukuvaia.harness.HarnessService;
-import ai.kukuvaia.provider.model.*;
-import ai.kukuvaia.provider.repository.*;
-import ai.kukuvaia.provider.service.*;
-import ai.kukuvaia.provider.secret.*;
-import ai.kukuvaia.provider.dto.*;
-import ai.kukuvaia.provider.transport.*;
+import ai.kukuvaia.provider.config.LlmProvidersProperties;
+import ai.kukuvaia.provider.service.ChatModelCache;
+import ai.kukuvaia.provider.service.ComplexityMappingService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,77 +15,70 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import ai.kukuvaia.provider.service.ChatModelCache;
-import ai.kukuvaia.provider.service.ComplexityMappingService;
-import ai.kukuvaia.provider.repository.ModelRoleRepository;
-import ai.kukuvaia.provider.service.ProviderRegistryService;
 
 /**
- * Dashboard endpoints for admin UI. Aggregates system state across all subsystems.
+ * Dashboard endpoints. Provider / model / role data is now derived from
+ * {@link LlmProvidersProperties} (file-based config) and the in-memory
+ * {@link ChatModelCache} instead of the database.
  */
 @RestController
 @RequestMapping("/api/dashboard")
 public class DashboardController {
 
-    private final ProviderRegistryService providerRegistry;
-    private final ModelRoleRepository modelRoleRepository;
+    private final LlmProvidersProperties providersProperties;
     private final ComplexityMappingService complexityMappingService;
     private final DreamService dreamService;
     private final HarnessService harnessService;
     private final ChatModelCache chatModelCache;
 
-    public DashboardController(ProviderRegistryService providerRegistry,
-                               ModelRoleRepository modelRoleRepository,
+    public DashboardController(LlmProvidersProperties providersProperties,
                                ComplexityMappingService complexityMappingService,
                                DreamService dreamService,
                                HarnessService harnessService,
                                ChatModelCache chatModelCache) {
-        this.providerRegistry = providerRegistry;
-        this.modelRoleRepository = modelRoleRepository;
+        this.providersProperties = providersProperties;
         this.complexityMappingService = complexityMappingService;
         this.dreamService = dreamService;
         this.harnessService = harnessService;
         this.chatModelCache = chatModelCache;
     }
 
-    /**
-     * System overview — providers, models, roles, agents, health snapshot.
-     */
     @GetMapping("/overview")
     public ResponseEntity<Map<String, Object>> overview() {
         var overview = new LinkedHashMap<String, Object>();
 
-        // Providers
-        var providers = providerRegistry.listProviders();
-        overview.put("providerCount", providers.size());
-        overview.put("providers", providers.stream()
-                .map(p -> Map.of("name", p.name(), "type", p.type(),
-                        "enabled", p.enabled(), "modelCount", p.modelCount()))
-                .toList());
+        var providers = providersProperties.getProviders();
+        overview.put("providerCount", providers != null ? providers.size() : 0);
+        if (providers != null) {
+            overview.put("providers", providers.stream()
+                    .filter(LlmProvidersProperties.ProviderDef::isEnabled)
+                    .map(p -> Map.of(
+                            "name", p.getName(),
+                            "type", p.getType(),
+                            "enabled", p.isEnabled(),
+                            "modelCount", p.getModels() != null ? p.getModels().size() : 0))
+                    .toList());
+        }
 
-        // Models
-        var models = providerRegistry.listModels();
-        overview.put("modelCount", models.size());
+        int totalModels = providers == null ? 0 : providers.stream()
+                .filter(LlmProvidersProperties.ProviderDef::isEnabled)
+                .mapToInt(p -> p.getModels() != null ? p.getModels().size() : 0)
+                .sum();
+        overview.put("modelCount", totalModels);
 
-        // Roles
-        var roles = providerRegistry.listRoles();
-        overview.put("roleCount", roles.size());
-        overview.put("roles", roles.stream()
-                .map(r -> Map.of("role", r.role(), "model", r.modelDisplayName(),
-                        "tier", r.modelTier(), "provider", r.providerName()))
-                .toList());
+        var roles = providersProperties.getRoles();
+        overview.put("roleCount", roles != null ? roles.size() : 0);
+        if (roles != null) {
+            overview.put("roles", roles.entrySet().stream()
+                    .map(e -> Map.of("role", e.getKey(), "modelId", e.getValue()))
+                    .toList());
+        }
 
-        // Complexity mappings
         overview.put("complexityMappings", complexityMappingService.listMappings().size());
-
-        // Cache
         overview.put("cachedModels", chatModelCache.size());
         overview.put("cachedRoles", chatModelCache.roleCount());
-
-        // Harness — file-backed store, single rules dimension (groups/rule-sets dropped with V20)
         overview.put("ruleCount", harnessService.listAll().size());
 
-        // Dream
         var pendingRecs = dreamService.getPendingRecommendations();
         overview.put("pendingRecommendations", pendingRecs.size());
         dreamService.getLatestReport().ifPresent(r ->
@@ -101,9 +91,6 @@ public class DashboardController {
         return ResponseEntity.ok(overview);
     }
 
-    /**
-     * Recent activity — last dream reports, pending recommendations.
-     */
     @GetMapping("/activity")
     public ResponseEntity<Map<String, Object>> activity() {
         var activity = new LinkedHashMap<String, Object>();
@@ -127,24 +114,29 @@ public class DashboardController {
     }
 
     /**
-     * System health — quick check of all subsystems.
+     * Health check endpoint — used by onboarding-sensei smoke test and CI.
      */
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
         var health = new LinkedHashMap<String, Object>();
 
         health.put("status", "ok");
-        health.put("providers", providerRegistry.listProviders().size());
-        health.put("models", providerRegistry.listModels().size());
-        health.put("roles", providerRegistry.listRoles().size());
+
+        var providers = providersProperties.getProviders();
+        health.put("providers", providers != null ? (int) providers.stream()
+                .filter(LlmProvidersProperties.ProviderDef::isEnabled).count() : 0);
+
+        int totalModels = providers == null ? 0 : providers.stream()
+                .filter(LlmProvidersProperties.ProviderDef::isEnabled)
+                .mapToInt(p -> p.getModels() != null ? p.getModels().size() : 0).sum();
+        health.put("models", totalModels);
+
+        health.put("roles", chatModelCache.roleCount());
         health.put("cachedModels", chatModelCache.size());
 
-        // Check critical roles
-        var roles = providerRegistry.listRoles();
-        var roleNames = roles.stream().map(r -> r.role()).toList();
-        health.put("hasSupervisorRole", roleNames.contains("supervisor"));
-        health.put("hasWorkerRole", roleNames.contains("worker"));
-        health.put("hasAdvisorRole", roleNames.contains("advisor"));
+        health.put("hasSupervisorRole", chatModelCache.getModelIdForRole("supervisor").isPresent());
+        health.put("hasWorkerRole", chatModelCache.getModelIdForRole("worker").isPresent());
+        health.put("hasAdvisorRole", chatModelCache.getModelIdForRole("advisor").isPresent());
 
         return ResponseEntity.ok(health);
     }
