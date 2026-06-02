@@ -4,13 +4,14 @@
 
 An extensible conversational AI agent platform. Kukuvaia is a self-hosted, open-source stack (Apache 2.0) that turns any OpenAI-compatible LLM into a tool-using agent with persistent memory, planning, personas, and user-extensible skills.
 
-This repository hosts three independently-deployed components:
+This repository hosts two independently-deployed components:
 
 | Component | Language | Role |
 |-----------|----------|------|
 | **`kukuvaia-engine`** | Java 21 + Kotlin 2.1 (Spring Boot + Spring AI) | Agent engine — LLM conversation, tool execution, sessions, memory, planning, Web API (HTTP/SSE) |
 | **`kukuvaia-cli`** | Go 1.24 (Charm stack) | Terminal UI client — Bubbletea + Lipgloss, connects to the engine over HTTP/SSE |
-| **`kukuvaia-admin`** | TypeScript (React 19 + Vite) | Admin web UI — provider/model management, dashboards, settings |
+
+LLM provider, model, and role configuration is **file-based** (`kukuvaia.llm-providers` in `application.yaml`, fed by env vars) — there is no separate admin UI or database table to populate.
 
 ---
 
@@ -24,7 +25,6 @@ Install these on your development machine. Versions below are the known-good set
 |------|---------|-----|--------------------------|
 | **Java JDK** | 21+ | `kukuvaia-engine` modules target Java 21 | `sudo apt install openjdk-21-jdk` or [SDKMAN!](https://sdkman.io/): `sdk install java 21.0.5-tem` |
 | **Go** | 1.24.2+ | `kukuvaia-cli` module | `sudo apt install golang-go` or download from [go.dev](https://go.dev/dl/) |
-| **Node.js** | 20 LTS or 22 LTS | `kukuvaia-admin` (React + Vite) | [`nvm install 22`](https://github.com/nvm-sh/nvm) |
 | **Docker** | 24+ with Compose v2 | Runs PostgreSQL (`pgvector/pgvector:pg17`) | `sudo apt install docker.io docker-compose-plugin` |
 | **Git** | 2.34+ | Source control | `sudo apt install git` |
 
@@ -50,10 +50,11 @@ docker run -d --name kukuvaia-postgres \
 
 ### LLM Provider
 
-Kukuvaia talks to any OpenAI-compatible endpoint via Spring AI's `OpenAiApi`. You need **one** of:
+Kukuvaia ships with **Anthropic** as the default provider; it also talks to any OpenAI-compatible endpoint via Spring AI. You need **one** of:
 
-- **OpenAI** — an API key from https://platform.openai.com/api-keys
-- **Anthropic via OpenAI-compatible proxy** (e.g., [LiteLLM](https://github.com/BerriAI/litellm), [OpenRouter](https://openrouter.ai))
+- **Anthropic** (default) — an API key from https://console.anthropic.com/ (set `ANTHROPIC_API_KEY`)
+- **OpenAI** — an API key from https://platform.openai.com/api-keys (set `PROVIDER_TYPE=openai`, `LLM_BASE_URL=https://api.openai.com`)
+- **OpenRouter** and other OpenAI-compatible proxies (e.g., [OpenRouter](https://openrouter.ai), [LiteLLM](https://github.com/BerriAI/litellm))
 - **GitHub Copilot** — OAuth device flow, free with active Copilot subscription (handled by the engine's `/login github` flow)
 - **SmartGate** — corporate gateway with JWT auth (internal Schibsted; skip if you are outside that network)
 - **Local models** via [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) — any that expose the OpenAI protocol
@@ -64,15 +65,15 @@ Kukuvaia talks to any OpenAI-compatible endpoint via Spring AI's `OpenAiApi`. Yo
 
 ```
 kukuvaia/
-├── kukuvaia-engine/      # Java/Spring Boot agent engine
-│   ├── kukuvaia-core/    # Domain logic, tools, API, security
-│   ├── kukuvaia-agents/  # Kotlin + Embabel GOAP planning
-│   ├── kukuvaia-memory/  # pgvector memory subsystem
-│   └── kukuvaia-app/     # Spring Boot entry point + Flyway migrations
-├── kukuvaia-cli/         # Go TUI client (Bubbletea)
-├── kukuvaia-admin/       # React admin web UI (Vite)
-├── kukuvaia-theme.yaml   # Shared design tokens (CLI + web)
-└── docs/                 # Architecture, plans, analyses, decisions
+├── kukuvaia-engine/        # Java/Spring Boot agent engine
+│   ├── kukuvaia-core/      # Domain logic, tools, API, security
+│   ├── kukuvaia-agents/    # Kotlin + Embabel GOAP planning
+│   ├── kukuvaia-memory/    # pgvector memory subsystem
+│   ├── kukuvaia-provider/  # File-based LLM provider/model/role config + routing
+│   └── kukuvaia-app/       # Spring Boot entry point + Flyway migrations
+├── kukuvaia-cli/           # Go TUI client (Bubbletea)
+├── kukuvaia-theme.yaml     # Shared design tokens (CLI + future web)
+└── docs/                   # Architecture, plans, analyses, decisions
 ```
 
 ---
@@ -100,7 +101,7 @@ Alternative — manual:
 cp kukuvaia-engine/.env.example kukuvaia-engine/.env
 ```
 
-Then open `kukuvaia-engine/.env` and set `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`. The Postgres defaults match the Docker container in step 2 (`PG_PASSWORD=kukuvaia`).
+Then open `kukuvaia-engine/.env` and set `ANTHROPIC_API_KEY` (or, for another provider, `PROVIDER_TYPE` + `LLM_BASE_URL` + the matching key). `LLM_MODEL` defaults to `claude-sonnet-4-6`. The Postgres defaults match the Docker container in step 2 (`PG_PASSWORD=kukuvaia`).
 
 > Skipping `.env` and starting the engine with an empty `PG_PASSWORD` is the #1 cause of `The server requested SCRAM-based authentication, but no password was provided` on first run.
 
@@ -122,40 +123,42 @@ cd kukuvaia-engine
 ./gradlew clean build -x test          # first build pulls ~500 MB of deps
 ```
 
-### 4. Install frontend & CLI deps
+### 4. Build the CLI
 
 ```bash
 # CLI (Go) — single binary, no deps to install globally; go modules handle it
 cd kukuvaia-cli
 go generate ./...                       # generates styles from kukuvaia-theme.yaml
 go build -o kukuvaia ./cmd/kukuvaia/
-
-# Admin (Node) — installs local node_modules
-cd ../kukuvaia-admin
-npm install
 ```
 
-### 5. Register provider, models, and role assignments in the admin dashboard
+### 5. Review provider, model, and role configuration
 
-After the engine is up (`./gradlew :kukuvaia-app:bootRun`) and the admin dev server is running (`npm run dev` in `kukuvaia-admin/`), open **http://localhost:5173** and do the following — in order:
+Provider/model/role config is **file-based** — no admin UI, no database table, no REST call. It lives in `kukuvaia-app/src/main/resources/application.yaml` under `kukuvaia.llm-providers`, and the common knobs are wired to env vars you set in `.env` (step 1):
 
-1. **Providers** → *Add provider.* Create one entry per LLM endpoint you want to use (e.g. `openai`, `openrouter`, `github-copilot`, `smartgate`, `ollama-local`). You provide a name, base URL (e.g. `https://api.openai.com`), the auth scheme, and the API key / token. Without at least one provider, the engine cannot route any LLM call — chats will fail with `No provider configured`.
+```yaml
+kukuvaia:
+  llm-providers:
+    providers:
+      - name: ${PROVIDER_NAME:anthropic}
+        type: ${PROVIDER_TYPE:anthropic}
+        baseUrl: ${LLM_BASE_URL:https://api.anthropic.com}
+        apiKeyRef: ${ANTHROPIC_API_KEY:}     # env-var name or a literal key
+        enabled: true
+        models:
+          - modelId: ${LLM_MODEL:claude-sonnet-4-6}
+            tier: ${LLM_MODEL_TIER:standard}
+            maxTokens: ${LLM_MAX_TOKENS:8096}
+            capabilities: [chat, tools]
+    roles:                                   # routing layer — a model per role
+      supervisor: ${LLM_MODEL:claude-sonnet-4-6}   # planning, decomposition, oversight
+      advisor:    ${LLM_MODEL:claude-sonnet-4-6}   # critique, review, second-opinion
+      worker:     ${LLM_MODEL:claude-sonnet-4-6}   # default tool-using agent
+```
 
-2. **Models** → *Add model.* For each provider, register the concrete models you want callable (e.g. `gpt-5`, `claude-sonnet-4.5`, `llama3.1:70b`). Each model belongs to a provider and gets a **tier** (small / medium / large) that the orchestrator uses for cost-vs-capability routing. A provider with no registered models is unusable.
+For the default single-Anthropic setup, just setting `ANTHROPIC_API_KEY` in `.env` is enough — all three roles point at `LLM_MODEL`. To run multiple providers or assign a different model per role, edit the `providers[]` / `roles` blocks directly. Kukuvaia's agent loop picks a model **per role**, not per call; a role with no assignment fails with `No model assigned for role <name>`.
 
-3. **Roles** → *Assign model to role.* This is the routing layer — Kukuvaia's agent loop picks a model **per role**, not per call. Assign one model to each of these roles:
-
-   | Role | Used for |
-   |------|----------|
-   | `supervisor` | Top-level planning, decomposition, oversight (pick your strongest reasoning model) |
-   | `advisor` | Critique, review, second-opinion passes |
-   | `worker` | Default tool-using agent — the model that runs the bulk of conversations |
-   | `worker-2` | Secondary worker for parallel sub-agents |
-   | `worker-3` | Tertiary worker (used by Embabel GOAP planning fan-out) |
-
-   The values in `LLM_MODEL` / `LLM_BASE_URL` from `.env` are only the **bootstrap fallback** — once role assignments exist in the DB, they take precedence. If a role has no assignment, requests routed to that role will return `No model assigned for role <name>`.
-
-> Smoke test: with at least the `worker` role assigned, the CLI's first `hello` should respond. If you also want planning + critique to work end-to-end (which most agent flows trigger), assign `supervisor` and `advisor` too — otherwise multi-step plans will fail mid-flight.
+> Smoke test: with `ANTHROPIC_API_KEY` set, the CLI's first `hello` should respond — `supervisor`, `advisor`, and `worker` all resolve to the same default model out of the box.
 
 ---
 
@@ -174,10 +177,6 @@ cd kukuvaia-engine
 # Terminal 3 — CLI
 cd kukuvaia-cli
 ./kukuvaia                             # REPL against http://localhost:8080
-
-# Terminal 4 — admin UI (optional, port 5173)
-cd kukuvaia-admin
-npm run dev
 ```
 
 ### Stop everything
@@ -199,9 +198,14 @@ The engine reads these at startup. For local development, put them in `kukuvaia-
 | `PG_DSN` | `jdbc:postgresql://localhost:5432/kukuvaia` | PostgreSQL JDBC URL |
 | `PG_USER` | `kukuvaia` | DB username |
 | `PG_PASSWORD` | _(empty)_ | DB password |
-| `LLM_BASE_URL` | `https://api.openai.com` | OpenAI-compatible endpoint |
-| `LLM_API_KEY` | `not-used` | API key (override per provider or use credentials file) |
-| `LLM_MODEL` | `claude-sonnet-4.5` | Default model name |
+| `ANTHROPIC_API_KEY` | _(empty)_ | API key for the default Anthropic provider (or a literal key referenced by `apiKeyRef`) |
+| `PROVIDER_NAME` | `anthropic` | Logical name of the default provider entry |
+| `PROVIDER_TYPE` | `anthropic` | Provider type (`anthropic`, `openai`, `openrouter`, …) |
+| `LLM_BASE_URL` | `https://api.anthropic.com` | Provider endpoint |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Default model name (used for all three roles unless overridden) |
+| `LLM_MODEL_DISPLAY` | `Claude Sonnet 4.6` | Human-readable model label |
+| `LLM_MODEL_TIER` | `standard` | Routing tier hint |
+| `LLM_MAX_TOKENS` | `8096` | Max output tokens per request |
 | `LLM_CONNECT_TIMEOUT` | `10s` | Connect timeout |
 | `LLM_READ_TIMEOUT` | `120s` | Read timeout |
 | `OPENAI_EMBEDDING_ENABLED` | `false` | If `true`, uses remote embeddings; else local ONNX (MiniLM-L6-v2) |
@@ -246,11 +250,6 @@ cd kukuvaia-engine
 # CLI
 cd kukuvaia-cli
 go test ./...
-
-# Admin
-cd kukuvaia-admin
-npm run lint
-npm run build                           # tsc + vite build
 ```
 
 ---
@@ -265,7 +264,7 @@ npm run build                           # tsc + vite build
 
 **`403` on `/api/*`** — either enable dev mode (`KUKUVAIA_SECURITY_DEV_MODE=true`, default) or provide a valid Bearer token per the auth scheme.
 
-**`No provider configured` / `No model assigned for role <name>`** — you skipped step 5 of First-time Setup. Open the admin dashboard at http://localhost:5173 and add a provider → register a model → assign it to the missing role. The engine reads these from the DB at request time, no restart needed.
+**`No provider configured` / `No model assigned for role <name>`** — provider/role config is incomplete in `application.yaml`. Ensure `ANTHROPIC_API_KEY` (or your provider's key) is set in `.env` and that each role under `kukuvaia.llm-providers.roles` maps to a `modelId` defined in `providers[].models[]`. Config is read at startup, so restart the engine after editing.
 
 **CLI prints escape codes like `]11;rgb:0000/0000/0000\`** — known issue when `glamour.WithAutoStyle()` queries terminal background. Fixed on `main`; rebuild the CLI.
 
@@ -279,7 +278,13 @@ The `validation-engine` (separate repo at `~/Projects/sl-validation-engine`) exp
 
 ### Register the connection
 
-The engine reads connections from PostgreSQL (`kukuvaia.mcp_connections`, see migration `V17`). Add a row either via the admin dashboard or directly:
+The engine reads connections from PostgreSQL (`kukuvaia.mcp_connections`, see migration `V17`). The quickest path is the bundled helper — it upserts the row and resolves the token from `VALIDATION_ENGINE_TOKEN` at request time:
+
+```bash
+psql -U kukuvaia -d kukuvaia -f scripts/register-validation-engine-mcp.sql
+```
+
+Or insert it directly:
 
 ```sql
 -- Replace VALIDATION_ENGINE_TOKEN with the env var name your deploy uses
@@ -294,7 +299,7 @@ VALUES (
 );
 ```
 
-After the row is in place, restart `kukuvaia-app` (or call the admin refresh endpoint). On startup the `McpToolDiscoveryLogger` prints the discovered tool count — should be 19 (5 context + 9 rule + 5 result tools, see [validation-engine architecture §7](https://github.com/sl-technology/sl-validation-engine/blob/master/docs/architecture/validation-engine.md#7-mcp-tool-surface)).
+After the row is in place, restart `kukuvaia-app` (or call `POST /api/admin/mcp/refresh`). On startup the `McpToolDiscoveryLogger` prints the discovered tool count — should be 19 (5 context + 9 rule + 5 result tools, see [validation-engine architecture §7](https://github.com/sl-technology/sl-validation-engine/blob/master/docs/architecture/validation-engine.md#7-mcp-tool-surface)).
 
 ### Health-check semantics
 
@@ -317,7 +322,7 @@ The compose file boots:
 - **validation-engine** — built from `~/Projects/sl-validation-engine`
 - **kukuvaia-engine** — built from this repo
 
-`scripts/phase2-smoke.sh` exercises the four gates from plan TG2.D.1: `POST /api/v2/validate` returns `runId`, the polled run reaches `COMPLETED`, at least one finding has `evaluatedBy=LLM`, and `outlineHash` is recorded. Set `LLM_API_KEY` in your shell before `up` if you want a real LLM round-trip; the smoke tolerates the bundled `not-used` placeholder when you only care about transport-level wiring.
+`scripts/phase2-smoke.sh` exercises the four gates from plan TG2.D.1: `POST /api/v2/validate` returns `runId`, the polled run reaches `COMPLETED`, at least one finding has `evaluatedBy=LLM`, and `outlineHash` is recorded. The compose file requires `ANTHROPIC_API_KEY` to be set in your shell before `up`; set it to a real key for a genuine LLM round-trip, or any non-empty value when you only care about transport-level wiring.
 
 Tear down:
 
