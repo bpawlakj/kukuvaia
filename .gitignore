@@ -53,6 +53,7 @@ Thumbs.db
 
 # ─── Claude / AI tooling (local-only settings) ─────────────────────
 .claude/settings.local.json
+.junie/
 
 # ─── Misc ──────────────────────────────────────────────────────────
 *.pid
