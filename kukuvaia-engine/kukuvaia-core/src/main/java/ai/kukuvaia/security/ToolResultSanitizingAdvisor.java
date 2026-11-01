@@ -22,7 +22,8 @@ public class ToolResultSanitizingAdvisor implements BaseAdvisor {
 
     private static final Logger log = LoggerFactory.getLogger(ToolResultSanitizingAdvisor.class);
 
-    private static final String SAFETY_SUFFIX = """
+    /** Also applied by non-ChatClient LLM paths (Embabel's GuardedChatModel). */
+    public static final String SAFETY_SUFFIX = """
 
             ---
             SECURITY BOUNDARY (always enforced):

@@ -42,7 +42,9 @@ public class McpConnectionsRepository {
             rs.getBoolean("enabled"),
             rs.getString("description"),
             toInstant(rs.getTimestamp("created_at")),
-            toInstant(rs.getTimestamp("updated_at"))
+            toInstant(rs.getTimestamp("updated_at")),
+            rs.getString("transport"),
+            rs.getString("endpoint")
     );
 
     public McpConnectionsRepository(JdbcTemplate jdbc, ObjectMapper jsonMapper) {
@@ -52,7 +54,7 @@ public class McpConnectionsRepository {
 
     public List<McpConnection> findAllEnabled() {
         return jdbc.query("""
-                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description,
+                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description, transport, endpoint,
                        created_at, updated_at
                 FROM kukuvaia.mcp_connections
                 WHERE enabled = true
@@ -62,7 +64,7 @@ public class McpConnectionsRepository {
 
     public List<McpConnection> findAll() {
         return jdbc.query("""
-                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description,
+                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description, transport, endpoint,
                        created_at, updated_at
                 FROM kukuvaia.mcp_connections
                 ORDER BY name
@@ -71,7 +73,7 @@ public class McpConnectionsRepository {
 
     public Optional<McpConnection> findById(UUID id) {
         var rows = jdbc.query("""
-                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description,
+                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description, transport, endpoint,
                        created_at, updated_at
                 FROM kukuvaia.mcp_connections
                 WHERE id = ?
@@ -81,7 +83,7 @@ public class McpConnectionsRepository {
 
     public Optional<McpConnection> findByName(String name) {
         var rows = jdbc.query("""
-                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description,
+                SELECT id, name, url, sse_endpoint, headers::text AS headers, enabled, description, transport, endpoint,
                        created_at, updated_at
                 FROM kukuvaia.mcp_connections
                 WHERE name = ?
@@ -91,18 +93,28 @@ public class McpConnectionsRepository {
 
     public UUID create(String name, String url, String sseEndpoint,
                        Map<String, String> headers, boolean enabled, String description) {
+        return create(name, url, sseEndpoint, headers, enabled, description, McpConnection.SSE, null);
+    }
+
+    public UUID create(String name, String url, String sseEndpoint, Map<String, String> headers,
+                       boolean enabled, String description, String transport, String endpoint) {
         UUID id = UUID.randomUUID();
         jdbc.update("""
                 INSERT INTO kukuvaia.mcp_connections
-                    (id, name, url, sse_endpoint, headers, enabled, description)
-                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?)
-                """, id, name, url, sseEndpoint, toJson(headers), enabled, description);
+                    (id, name, url, sse_endpoint, headers, enabled, description, transport, endpoint)
+                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, COALESCE(?, 'sse'), COALESCE(?, '/mcp'))
+                """, id, name, url, sseEndpoint, toJson(headers), enabled, description, transport, endpoint);
         log.info("MCP connection created: name={} id={}", name, id);
         return id;
     }
 
     public int update(UUID id, String url, String sseEndpoint,
                       Map<String, String> headers, Boolean enabled, String description) {
+        return update(id, url, sseEndpoint, headers, enabled, description, null, null);
+    }
+
+    public int update(UUID id, String url, String sseEndpoint, Map<String, String> headers,
+                      Boolean enabled, String description, String transport, String endpoint) {
         int affected = jdbc.update("""
                 UPDATE kukuvaia.mcp_connections
                    SET url = COALESCE(?, url),
@@ -110,10 +122,12 @@ public class McpConnectionsRepository {
                        headers = COALESCE(?::jsonb, headers),
                        enabled = COALESCE(?, enabled),
                        description = COALESCE(?, description),
+                       transport = COALESCE(?, transport),
+                       endpoint = COALESCE(?, endpoint),
                        updated_at = NOW()
                  WHERE id = ?
                 """, url, sseEndpoint, headers == null ? null : toJson(headers),
-                enabled, description, id);
+                enabled, description, transport, endpoint, id);
         if (affected > 0) {
             log.info("MCP connection updated: id={}", id);
         }

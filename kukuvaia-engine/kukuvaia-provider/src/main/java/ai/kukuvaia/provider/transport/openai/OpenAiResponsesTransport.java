@@ -84,15 +84,19 @@ public final class OpenAiResponsesTransport implements ChatTransport {
         List<Map<String, Object>> input = (List<Map<String, Object>>) body.get("input");
 
         Map<String, Object> lastRoot = null;
+        var usage = new ai.kukuvaia.provider.transport.TransportUsage();
+        ChatResponse lastResponse = null;
         for (int iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
             String payload = mapper.serialiseRequest(body);
             String responseBody = sendSync(payload);
             lastRoot = mapper.parseResponseJson(responseBody);
+            lastResponse = mapper.toChatResponse(lastRoot, model.modelId());
+            usage.add(lastResponse);
 
             List<OpenAiResponsesMapper.FunctionCall> calls =
                     OpenAiResponsesMapper.extractFunctionCalls(lastRoot);
             if (calls.isEmpty()) {
-                return mapper.toChatResponse(lastRoot, model.modelId());
+                return usage.finish(lastResponse);
             }
             if (callbacks.isEmpty()) {
                 throw new ResponsesTransportException(
@@ -108,7 +112,7 @@ public final class OpenAiResponsesTransport implements ChatTransport {
         }
 
         log.warn("[responses] tool loop exceeded {} iterations — returning last partial response", MAX_TOOL_ITERATIONS);
-        return mapper.toChatResponse(lastRoot, model.modelId());
+        return usage.finish(lastResponse);
     }
 
     @Override
@@ -213,6 +217,8 @@ public final class OpenAiResponsesTransport implements ChatTransport {
             if (call.name().equals(cb.getToolDefinition().name())) {
                 try {
                     return cb.call(call.arguments());
+                } catch (ai.kukuvaia.provider.transport.ToolCallAbortedException e) {
+                    throw e;
                 } catch (Exception e) {
                     log.warn("[responses] Tool '{}' threw: {}", call.name(), e.getMessage());
                     return "{\"error\":\"" + escapeJson(e.getMessage()) + "\"}";

@@ -4,6 +4,10 @@ import ai.kukuvaia.mcp.DbMcpSseClientConnectionDetails;
 import ai.kukuvaia.mcp.McpConnectionsCache;
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
+import ai.kukuvaia.mcp.McpConnection;
+import org.springframework.ai.mcp.customizer.McpClientCustomizer;
 import io.modelcontextprotocol.client.transport.customizer.McpSyncHttpClientRequestCustomizer;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -24,21 +28,28 @@ import java.net.http.HttpRequest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Wires kukuvaia's DB-backed MCP connection registry into Spring AI's
  * autoconfigure and applies per-connection outbound headers.
  *
- * <p>Two beans:
+ * <p>Beans:
  *
  * <ol>
  *   <li>{@link McpSseClientConnectionDetails} — overrides the
  *       properties-backed default so {@code spring.ai.mcp.client.sse.connections.*}
- *       YAML is irrelevant. Connections come from {@code kukuvaia.mcp_connections}
- *       via {@link McpConnectionsCache}.</li>
+ *       YAML is irrelevant. {@code transport = sse} connections come from
+ *       {@code kukuvaia.mcp_connections} via {@link McpConnectionsCache}.</li>
+ *   <li>{@link #dbStreamableHttpTransports} — one Streamable HTTP transport per
+ *       {@code transport = streamable-http} row (Spring AI's own Streamable HTTP
+ *       autoconfig only reads YAML properties).</li>
  *   <li>{@link McpSyncHttpClientRequestCustomizer} — injects the headers
  *       configured per connection. The cache's URL-prefix lookup picks
- *       the right connection for each outbound request URI.</li>
+ *       the right connection for each outbound request URI. Spring AI 2.0's SSE
+ *       transport autoconfig does <em>not</em> apply this customizer by itself, so
+ *       {@link #sseHeaderCustomizer} installs it on every SSE transport builder —
+ *       without it SSE connections silently lose their auth headers.</li>
  * </ol>
  *
  * <p>Header values in the DB can use the {@code env:VAR_NAME} convention
@@ -78,6 +89,49 @@ public class McpClientConfig {
         return new PerConnectionHeaderCustomizer(cache, System::getenv);
     }
 
+    /** Upper bound for one MCP response body (protects the heap from a hostile or broken server). */
+    static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+    /**
+     * Applies the connection's own headers to its SSE transport (Spring AI's SSE autoconfig does not apply
+     * any request customizer). The transport name is the connection name.
+     */
+    @Bean
+    McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(McpConnectionsCache cache) {
+        return sseHeaderCustomizer(cache, System::getenv);
+    }
+
+    static McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(
+            McpConnectionsCache cache, PerConnectionHeaderCustomizer.EnvResolver env) {
+        return (name, builder) -> builder
+                .httpRequestCustomizer(PerConnectionHeaderCustomizer.forConnection(cache, env, name))
+                .maxResponseSize(MAX_RESPONSE_BYTES);
+    }
+
+    /** Streamable HTTP transports for {@code transport = streamable-http} connections. */
+    @Bean
+    List<NamedClientMcpTransport> dbStreamableHttpTransports(McpConnectionsCache cache) {
+        return streamableHttpTransports(cache, System::getenv);
+    }
+
+    static List<NamedClientMcpTransport> streamableHttpTransports(McpConnectionsCache cache,
+                                                                  PerConnectionHeaderCustomizer.EnvResolver env) {
+        List<NamedClientMcpTransport> out = new ArrayList<>();
+        for (McpConnection c : cache.all()) {
+            if (!c.isStreamableHttp()) continue;
+            var transport = HttpClientStreamableHttpTransport.builder(c.url())
+                    .endpoint(c.endpoint())
+                    .httpRequestCustomizer(PerConnectionHeaderCustomizer.forConnection(cache, env, c.name()))
+                    .maxResponseSize(MAX_RESPONSE_BYTES)
+                    .build();
+            out.add(new NamedClientMcpTransport(c.name(), transport));
+        }
+        if (!out.isEmpty()) {
+            log.info("MCP Streamable HTTP transports from DB: {}", out.stream().map(NamedClientMcpTransport::name).toList());
+        }
+        return out;
+    }
+
     /**
      * Replacement for the {@code mcpSyncClients} bean that {@link EmbabelBeanOverride} removes
      * to break the parent/subclass factory-method ambiguity in
@@ -109,7 +163,8 @@ public class McpClientConfig {
                     log.info("MCP sync client initialized for connection '{}' (timeout={})",
                             t.name(), commonProperties.getRequestTimeout());
                 } catch (Exception e) {
-                    log.warn("MCP sync client '{}' initialize() failed: {}", t.name(), e.getMessage());
+                    // The raw message may carry URLs / server text — log the type only.
+                    log.warn("MCP sync client '{}' initialize() failed ({})", t.name(), e.getClass().getSimpleName());
                 }
             }
             clients.add(client);
@@ -124,6 +179,20 @@ public class McpClientConfig {
         return clients;
     }
 
+    /** Clients by connection name — the client info name is {@code "<common name> - <connection>"}. */
+    @Bean
+    ai.kukuvaia.mcp.McpClientRegistry mcpClientRegistry(
+            @org.springframework.beans.factory.annotation.Qualifier("kukuvaiaMcpSyncClients") List<McpSyncClient> clients,
+            McpClientCommonProperties commonProperties) {
+        String prefix = commonProperties.getName() + " - ";
+        Map<String, McpSyncClient> byName = new java.util.LinkedHashMap<>();
+        for (McpSyncClient client : clients) {
+            String name = client.getClientInfo().name();
+            byName.put(name.startsWith(prefix) ? name.substring(prefix.length()) : name, client);
+        }
+        return new ai.kukuvaia.mcp.McpClientRegistry(byName);
+    }
+
     /**
      * Matches the outbound URI to a configured connection, reads its
      * header map from the cache, resolves env refs, and applies headers.
@@ -133,6 +202,8 @@ public class McpClientConfig {
 
         private final McpConnectionsCache cache;
         private final EnvResolver env;
+        /** When set, only this connection's headers, and only for requests to its own origin. */
+        private final String fixedConnection;
 
         /** Functional interface so tests can inject a fake env. */
         public interface EnvResolver {
@@ -140,8 +211,18 @@ public class McpClientConfig {
         }
 
         public PerConnectionHeaderCustomizer(McpConnectionsCache cache, EnvResolver env) {
+            this(cache, env, null);
+        }
+
+        private PerConnectionHeaderCustomizer(McpConnectionsCache cache, EnvResolver env, String fixedConnection) {
             this.cache = cache;
             this.env = env;
+            this.fixedConnection = fixedConnection;
+        }
+
+        /** Customizer bound to one connection — used for the transports this config builds. */
+        public static PerConnectionHeaderCustomizer forConnection(McpConnectionsCache cache, EnvResolver env, String name) {
+            return new PerConnectionHeaderCustomizer(cache, env, name);
         }
 
         @Override
@@ -151,7 +232,21 @@ public class McpClientConfig {
                               @Nullable String body,
                               McpTransportContext context) {
             if (endpoint == null) return;
-            var connectionName = cache.connectionNameForUri(endpoint.toString());
+            Optional<String> connectionName;
+            if (fixedConnection != null) {
+                // Never send this connection's credentials anywhere but its own origin
+                // (e.g. an SSE 'endpoint' event pointing at another host).
+                boolean ownOrigin = cache.find(fixedConnection)
+                        .map(c -> McpConnectionsCache.matches(origin(c.url()), endpoint.toString()))
+                        .orElse(false);
+                if (!ownOrigin) {
+                    log.warn("MCP connection '{}': request to a different origin — headers not sent", fixedConnection);
+                    return;
+                }
+                connectionName = Optional.of(fixedConnection);
+            } else {
+                connectionName = cache.connectionNameForUri(endpoint.toString());
+            }
             if (connectionName.isEmpty()) return;
             Map<String, String> headers = cache.headersFor(connectionName.get());
             for (var h : headers.entrySet()) {
@@ -159,6 +254,11 @@ public class McpClientConfig {
                 if (value == null || value.isBlank()) continue;
                 builder.header(h.getKey(), value);
             }
+        }
+
+        private static String origin(String url) {
+            URI u = URI.create(url);
+            return u.getScheme() + "://" + u.getRawAuthority();
         }
 
         String resolve(String value) {

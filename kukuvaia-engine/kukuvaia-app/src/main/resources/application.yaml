@@ -5,7 +5,49 @@ kukuvaia:
     request-timeout: 120
     connect-timeout: ${LLM_CONNECT_TIMEOUT_SECONDS:10}
   daemon:
+    # Routing role for unattended work (cron, webhooks, PG NOTIFY). Point it at SmartGate via
+    # llm-providers.roles.daemon. Without that role daemon work uses the supervisor role, and is
+    # refused if that resolves to GitHub Copilot — Copilot is opt-in per job (provider: copilot).
+    default-provider: ${KUKUVAIA_DAEMON_PROVIDER:daemon}
     daily-token-budget: 100000
+    # Global tool allowlist for every daemon run, intersected with each specialist's tools.
+    # Empty = specialist allowlists only. Example: [read_file, search_content]
+    allowed-tools: []
+    # kind: mcp jobs are deny-by-default: list each permitted remote tool as connection/tool.
+    # Example: [sl-aipdlc/sl_status]
+    mcp-allowed-tools: []
+    # Kill switch for all daemon work (cron, webhooks, PG NOTIFY, manual runs).
+    enabled: ${KUKUVAIA_DAEMON_ENABLED:true}
+    # Daemon runs executing at once (all kinds) and admitted runs allowed to wait for a slot.
+    max-concurrent: 2
+    max-queued: 100
+    # Job definitions: built-ins from classpath:daemon/*.yaml. Project jobs from .kukuvaia/daemon/*.yaml
+    # only when enabled — CLI mode on your own machine; keep false on servers (server-controlled config).
+    project-jobs: ${KUKUVAIA_DAEMON_PROJECT_JOBS:false}
+    scheduler-pool-size: 2
+    zone: ${KUKUVAIA_DAEMON_ZONE:}
+    # After a deadline, wait this long for a cancelled run to stop; a run that ignores cancellation
+    # keeps its slot and overlap lock until it really ends.
+    cancel-grace-millis: 5000
+    # Finished daemon_tasks rows older than this are deleted nightly.
+    retention-days: 30
+    retention-cron: "0 30 3 * * *"
+    # /api/daemon manual runs and full results are refused while security.dev-mode=true (API auth is
+    # bypassed then). Set to true only for local use.
+    api-allow-in-dev-mode: ${KUKUVAIA_DAEMON_API_ALLOW_IN_DEV_MODE:false}
+    # PG NOTIFY triggers: one batch per channel after a quiet window, at most max-wait after the first
+    # event; at most max-batch-size payloads are kept (overflow is counted). The LISTEN connection is
+    # borrowed from the pool for the app's lifetime — keep hikari maximum-pool-size >= 2.
+    notify-debounce-seconds: 5
+    notify-max-wait-seconds: 30
+    notify-max-batch-size: 100
+    notifications:
+      # Jobs list sinks in `notify:` (log | webhook). Sinks only receive the sanitized summary;
+      # full results stay behind the authenticated /api/daemon/tasks/{id}.
+      webhook:
+        url: ${KUKUVAIA_DAEMON_NOTIFY_WEBHOOK_URL:}        # https only (http allowed for localhost)
+        secret: ${KUKUVAIA_DAEMON_NOTIFY_WEBHOOK_SECRET:}  # HMAC-SHA256 → X-Kukuvaia-Signature-256
+        timeout-seconds: 5
   subagent:
     max-parallel-workers: 3
   webhooks:
@@ -83,6 +125,7 @@ kukuvaia:
       supervisor: ${LLM_MODEL:claude-sonnet-4-6}
       advisor: ${LLM_MODEL:claude-sonnet-4-6}
       worker: ${LLM_MODEL:claude-sonnet-4-6}
+      # daemon: <SmartGate model id>   # unattended work (kukuvaia.daemon.default-provider)
 
 spring:
   application:

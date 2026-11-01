@@ -31,7 +31,8 @@ dependencies {
     // Boot 4: Flyway auto-configuration lives in its own module — flyway-core alone no longer triggers it
     api 'org.springframework.boot:spring-boot-starter-flyway'
     api 'org.flywaydb:flyway-database-postgresql'
-    runtimeOnly 'org.postgresql:postgresql'
+    // compile scope: PgNotifyListener uses org.postgresql.PGConnection for LISTEN/NOTIFY
+    implementation 'org.postgresql:postgresql'
 
     // Observability — Micrometer API for custom metrics + AOP for @Tool timing
     api 'io.micrometer:micrometer-core'

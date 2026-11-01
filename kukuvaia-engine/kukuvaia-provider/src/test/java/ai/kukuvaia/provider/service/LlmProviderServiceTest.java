@@ -52,7 +52,13 @@ class LlmProviderServiceTest {
     @Test
     @DisplayName("resolve with empty string — falls back to supervisor role")
     void resolve_empty_fallsToSupervisor() {
+        when(chatModelCache.getByRole("daemon")).thenReturn(null); // no dedicated daemon role configured
         when(chatModelCache.getByRole("supervisor")).thenReturn(mockChatModel);
+        // Daemon policy needs to see the provider behind the fallback role (fails closed otherwise).
+        when(chatModelCache.getProviderForRole("supervisor")).thenReturn(java.util.Optional.of(
+                new ai.kukuvaia.provider.model.ProviderRecord(java.util.UUID.randomUUID(), "anthropic", "anthropic",
+                        "https://api.anthropic.com", "KEY", true, 0, java.util.Map.of(),
+                        java.time.Instant.now(), java.time.Instant.now())));
 
         ChatModel result = service.resolve("", ExecutionContext.DAEMON);
 

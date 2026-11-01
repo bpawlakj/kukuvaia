@@ -46,7 +46,9 @@ class SubAgentFactoryParallelTest {
                         "You are a summarizer.", List.of(), "haiku", 1024, 1, 0.0, 10)
         ));
 
-        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor, toolRegistry, specLoader, new SimpleMeterRegistry());
+        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor,
+                new ai.kukuvaia.provider.service.ProviderAuditLog(new SimpleMeterRegistry()),
+                toolRegistry, specLoader, new SimpleMeterRegistry());
     }
 
     @Test
@@ -68,7 +70,7 @@ class SubAgentFactoryParallelTest {
     @Test
     @DisplayName("executeParallel — resolves worker models for round-robin")
     void executeParallel_resolvesWorkerModels() {
-        when(providerService.resolveWorkerModels()).thenReturn(List.of(workerModel1, workerModel2));
+        when(providerService.resolveWorkerModels(any())).thenReturn(List.of(workerModel1, workerModel2));
 
         var tasks = List.of(
                 new WorkerTask("analyze X", "analyst"),
@@ -84,13 +86,13 @@ class SubAgentFactoryParallelTest {
         assertThat(results.get(0).specialistType()).isEqualTo("analyst");
         assertThat(results.get(1).specialistType()).isEqualTo("summarizer");
 
-        verify(providerService).resolveWorkerModels();
+        verify(providerService).resolveWorkerModels(ExecutionContext.INTERACTIVE);
     }
 
     @Test
     @DisplayName("executeParallel — empty worker models falls back gracefully")
     void executeParallel_noWorkerModels_fallsBack() {
-        when(providerService.resolveWorkerModels()).thenReturn(List.of());
+        when(providerService.resolveWorkerModels(any())).thenReturn(List.of());
 
         var tasks = List.of(new WorkerTask("task1", "analyst"));
 
@@ -104,7 +106,7 @@ class SubAgentFactoryParallelTest {
     @Test
     @DisplayName("executeParallel — results preserve input order")
     void executeParallel_preservesOrder() {
-        when(providerService.resolveWorkerModels()).thenReturn(List.of(workerModel1));
+        when(providerService.resolveWorkerModels(any())).thenReturn(List.of(workerModel1));
 
         var tasks = List.of(
                 new WorkerTask("first", "analyst"),
@@ -123,7 +125,7 @@ class SubAgentFactoryParallelTest {
     @Test
     @DisplayName("executeParallel — unknown specialist type returns FAILED")
     void executeParallel_unknownSpecialist_fails() {
-        when(providerService.resolveWorkerModels()).thenReturn(List.of(workerModel1));
+        when(providerService.resolveWorkerModels(any())).thenReturn(List.of(workerModel1));
 
         var tasks = List.of(new WorkerTask("task", "nonexistent"));
 

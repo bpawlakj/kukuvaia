@@ -92,16 +92,20 @@ public final class AnthropicMessagesTransport implements ChatTransport {
         List<Map<String, Object>> messages = (List<Map<String, Object>>) body.get("messages");
 
         Map<String, Object> lastRoot = null;
+        var usage = new ai.kukuvaia.provider.transport.TransportUsage();
+        ChatResponse lastResponse = null;
         for (int iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
             String payload = mapper.serialiseRequest(body);
             String responseBody = sendSync(payload);
             lastRoot = mapper.parseResponseJson(responseBody);
+            lastResponse = mapper.toChatResponse(lastRoot, model.modelId());
+            usage.add(lastResponse);
 
             String stopReason = stringOrNull(lastRoot.get("stop_reason"));
             List<AnthropicMessagesMapper.ToolUse> toolUses = AnthropicMessagesMapper.extractToolUses(lastRoot);
 
             if (!"tool_use".equals(stopReason) || toolUses.isEmpty()) {
-                return mapper.toChatResponse(lastRoot, model.modelId());
+                return usage.finish(lastResponse);
             }
             if (callbacks.isEmpty()) {
                 throw new AnthropicTransportException(
@@ -121,7 +125,7 @@ public final class AnthropicMessagesTransport implements ChatTransport {
         }
 
         log.warn("[anthropic] tool loop exceeded {} iterations — returning last partial response", MAX_TOOL_ITERATIONS);
-        return mapper.toChatResponse(lastRoot, model.modelId());
+        return usage.finish(lastResponse);
     }
 
     @Override
@@ -229,6 +233,8 @@ public final class AnthropicMessagesTransport implements ChatTransport {
                         args = "{}";
                     }
                     return cb.call(args);
+                } catch (ai.kukuvaia.provider.transport.ToolCallAbortedException e) {
+                    throw e;
                 } catch (Exception e) {
                     log.warn("[anthropic] Tool '{}' threw: {}", use.name(), e.getMessage());
                     return "{\"error\":\"" + escapeJson(e.getMessage()) + "\"}";

@@ -51,9 +51,18 @@ public class McpConnectionsCache {
         connections.addAll(fresh);
         headersByName.clear();
         nameByUrlPrefix.clear();
+        java.util.Set<String> ambiguous = new java.util.HashSet<>();
         for (McpConnection c : fresh) {
             headersByName.put(c.name(), c.headers());
-            nameByUrlPrefix.put(normalise(c.url()), c.name());
+            String key = normalise(c.url());
+            String previous = nameByUrlPrefix.putIfAbsent(key, c.name());
+            if (previous != null) ambiguous.add(key);
+        }
+        for (String key : ambiguous) {
+            // Two connections on the same base URL cannot be told apart by URI — never guess whose
+            // credentials to send. Their transports still get headers via per-connection customizers.
+            log.error("MCP connections share the base URL {} — URI-based header lookup disabled for it", key);
+            nameByUrlPrefix.put(key, AMBIGUOUS);
         }
         log.info("MCP connections cache refreshed — {} enabled connections", fresh.size());
     }
@@ -76,13 +85,47 @@ public class McpConnectionsCache {
         String best = null;
         int bestLen = -1;
         for (var entry : nameByUrlPrefix.entrySet()) {
-            if (uri.startsWith(entry.getKey()) && entry.getKey().length() > bestLen) {
+            if (matches(entry.getKey(), uri) && entry.getKey().length() > bestLen) {
                 best = entry.getValue();
                 bestLen = entry.getKey().length();
             }
         }
-        return Optional.ofNullable(best);
+        return AMBIGUOUS.equals(best) ? Optional.empty() : Optional.ofNullable(best);
     }
+
+    public Optional<McpConnection> find(String connectionName) {
+        return connections.stream().filter(c -> c.name().equals(connectionName)).findFirst();
+    }
+
+    /**
+     * Same scheme, host and port, and the request path equals the base path or continues it at a
+     * {@code /} boundary — so {@code https://api.x.com} never matches {@code https://api.x.com.evil.net}.
+     */
+    public static boolean matches(String baseUrl, String requestUri) {
+        try {
+            java.net.URI base = java.net.URI.create(normalise(baseUrl));
+            java.net.URI req = java.net.URI.create(requestUri);
+            if (base.getScheme() == null || req.getScheme() == null || base.getHost() == null || req.getHost() == null) {
+                return false;
+            }
+            if (!base.getScheme().equalsIgnoreCase(req.getScheme()) || !base.getHost().equalsIgnoreCase(req.getHost())
+                    || port(base) != port(req)) {
+                return false;
+            }
+            String basePath = base.getRawPath() == null ? "" : base.getRawPath();
+            String reqPath = req.getRawPath() == null ? "" : req.getRawPath();
+            return basePath.isEmpty() || reqPath.equals(basePath) || reqPath.startsWith(basePath + "/");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private static int port(java.net.URI uri) {
+        if (uri.getPort() != -1) return uri.getPort();
+        return "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    private static final String AMBIGUOUS = "\u0000ambiguous";
 
     private static String normalise(String url) {
         if (url == null) return "";

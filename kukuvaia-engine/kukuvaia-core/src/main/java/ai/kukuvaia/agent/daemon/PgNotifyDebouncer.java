@@ -5,27 +5,41 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * Debounces PG NOTIFY events to prevent daemon task storms.
- * Covers: Finding #16 (PG NOTIFY storm → daemon task flood).
+ * Debounces PG NOTIFY events to prevent daemon task storms (security-review #16).
  *
- * Batches events from the same channel over a configurable window,
- * then fires a single daemon task with the aggregated payload.
+ * <p>Events of one channel are collected until the channel has been quiet for
+ * {@code notify-debounce-seconds}, but never longer than {@code notify-max-wait-seconds} after the
+ * first event (a steady trickle cannot starve the flush). At most {@code notify-max-batch-size}
+ * payloads are buffered; further events in the same window are only counted. So a storm of any size
+ * produces one batch per window, and memory stays bounded.
  */
 @Component
 public class PgNotifyDebouncer {
 
     private static final Logger log = LoggerFactory.getLogger(PgNotifyDebouncer.class);
 
+    /** Receives one flushed window: the buffered payloads and the total number of events seen. */
+    @FunctionalInterface
+    public interface BatchHandler {
+        void accept(List<String> payloads, int totalEvents);
+    }
+
     @Value("${kukuvaia.daemon.notify-debounce-seconds:5}")
     private int debounceSeconds;
+
+    @Value("${kukuvaia.daemon.notify-max-wait-seconds:30}")
+    private int maxWaitSeconds;
 
     @Value("${kukuvaia.daemon.notify-max-batch-size:100}")
     private int maxBatchSize;
@@ -38,22 +52,17 @@ public class PgNotifyDebouncer {
                 return t;
             });
 
-    /**
-     * Register a channel listener with debouncing.
-     *
-     * @param channel  PG NOTIFY channel name
-     * @param consumer called with batched payloads after debounce window
-     */
-    public void register(String channel, Consumer<List<String>> consumer) {
-        accumulators.put(channel, new BatchAccumulator(consumer));
-        log.info("Registered debounced PG NOTIFY listener for channel '{}' " +
-                "(window={}s, maxBatch={})", channel, debounceSeconds, maxBatchSize);
+    public void register(String channel, BatchHandler handler) {
+        accumulators.put(channel, new BatchAccumulator(channel, handler));
+        log.info("Registered debounced PG NOTIFY listener for channel '{}' (window={}s, maxWait={}s, maxBatch={})",
+                channel, debounceSeconds, maxWaitSeconds, maxBatchSize);
     }
 
-    /**
-     * Accept a notification from PG NOTIFY.
-     * Buffers the payload and schedules flush after debounce window.
-     */
+    public void register(String channel, Consumer<List<String>> consumer) {
+        register(channel, (payloads, total) -> consumer.accept(payloads));
+    }
+
+    /** Accept a notification; buffers it and (re)schedules the flush. */
     public void onNotification(String channel, String payload) {
         BatchAccumulator acc = accumulators.get(channel);
         if (acc == null) {
@@ -63,53 +72,59 @@ public class PgNotifyDebouncer {
         acc.add(payload);
     }
 
+    @jakarta.annotation.PreDestroy
     public void shutdown() {
         scheduler.shutdown();
-        // Flush remaining batches
         accumulators.values().forEach(BatchAccumulator::flushNow);
     }
 
     private class BatchAccumulator {
-        private final Consumer<List<String>> consumer;
+        private final String channel;
+        private final BatchHandler handler;
         private final List<String> buffer = new ArrayList<>();
+        private int total;
+        private long firstEventNanos;
         private ScheduledFuture<?> pendingFlush;
 
-        BatchAccumulator(Consumer<List<String>> consumer) {
-            this.consumer = consumer;
+        BatchAccumulator(String channel, BatchHandler handler) {
+            this.channel = channel;
+            this.handler = handler;
         }
 
         synchronized void add(String payload) {
-            buffer.add(payload);
-
-            // If batch is full, flush immediately
-            if (buffer.size() >= maxBatchSize) {
-                log.info("PG NOTIFY batch full ({} events), flushing immediately",
-                        maxBatchSize);
-                flushNow();
-                return;
+            if (total == 0) firstEventNanos = System.nanoTime();
+            total++;
+            if (buffer.size() < Math.max(1, maxBatchSize)) {
+                buffer.add(payload);
+            } else if (total == maxBatchSize + 1) {
+                log.warn("PG NOTIFY '{}': more than {} events in one window — further payloads are counted only",
+                        channel, maxBatchSize);
             }
-
-            // Schedule flush after debounce window (reset on each new event)
-            if (pendingFlush != null) {
-                pendingFlush.cancel(false);
-            }
-            pendingFlush = scheduler.schedule(this::flushNow,
-                    debounceSeconds, TimeUnit.SECONDS);
+            if (pendingFlush != null) pendingFlush.cancel(false);
+            long sinceFirstMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - firstEventNanos);
+            // A max-wait below the window (or 0) must never disable debouncing.
+            long maxWaitMs = TimeUnit.SECONDS.toMillis(Math.max(maxWaitSeconds, debounceSeconds));
+            long untilMaxWaitMs = Math.max(0, maxWaitMs - sinceFirstMs);
+            long delayMs = Math.min(TimeUnit.SECONDS.toMillis(debounceSeconds), untilMaxWaitMs);
+            if (scheduler.isShutdown()) return;
+            pendingFlush = scheduler.schedule(this::flushNow, delayMs, TimeUnit.MILLISECONDS);
         }
 
         synchronized void flushNow() {
-            if (buffer.isEmpty()) return;
+            if (total == 0) return;
             List<String> batch = new ArrayList<>(buffer);
+            int events = total;
             buffer.clear();
+            total = 0;
             if (pendingFlush != null) {
                 pendingFlush.cancel(false);
                 pendingFlush = null;
             }
-            log.info("Flushing PG NOTIFY batch: {} events", batch.size());
+            log.info("Flushing PG NOTIFY batch on '{}': {} events ({} buffered)", channel, events, batch.size());
             try {
-                consumer.accept(batch);
+                handler.accept(batch, events);
             } catch (Exception e) {
-                log.error("Error processing PG NOTIFY batch", e);
+                log.error("Error processing PG NOTIFY batch on '{}'", channel, e);
             }
         }
     }

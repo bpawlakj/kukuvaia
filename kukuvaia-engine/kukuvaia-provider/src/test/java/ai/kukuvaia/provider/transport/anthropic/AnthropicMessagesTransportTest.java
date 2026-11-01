@@ -7,6 +7,8 @@ import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -104,6 +106,63 @@ class AnthropicMessagesTransportTest {
         ToolCallingChatOptions options = ToolCallingChatOptions.builder()
                 .toolCallbacks(List.of(callbacks)).build();
         return new Prompt(List.of(new UserMessage(text)), options);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void requestOutputLimitReachesNativeWireBody(boolean completionOption) throws Exception {
+        stubResponse(200, "{\"id\":\"r\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\"}");
+        var options = org.springframework.ai.openai.OpenAiChatOptions.builder();
+        if (completionOption) options.maxCompletionTokens(32); else options.maxTokens(32);
+
+        transport.call(new Prompt("hi", options.build()));
+
+        var sent = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(sent.capture(), any(HttpResponse.BodyHandler.class));
+        assertThat(new ObjectMapper().readTree(extractBody(sent.getValue())).path("max_tokens").asInt()).isEqualTo(32);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nativeToolRoundsKeepUsageTotalsAndCompleteness(boolean firstMetered) throws Exception {
+        String first = "{\"id\":\"r1\",\"content\":[{\"type\":\"tool_use\",\"id\":\"c\",\"name\":\"f\",\"input\":{}}],\"stop_reason\":\"tool_use\""
+                + (firstMetered ? ",\"usage\":{\"input_tokens\":80,\"output_tokens\":20}" : "") + "}";
+        scriptResponses(first, "{\"id\":\"r2\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":8,\"output_tokens\":2}}");
+        var tool = recordingCallback("f", new AtomicInteger(), "ok");
+
+        var result = transport.call(promptWithTool("hi", tool));
+
+        assertThat(result.getMetadata().getUsage().getTotalTokens()).isEqualTo(firstMetered ? 110 : 10);
+        assertThat((Boolean) result.getMetadata().get(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE))
+                .isEqualTo(firstMetered);
+    }
+
+    @Test
+    void nativeToolLoopPropagatesGuardrailAbortBeforeAnotherHttpRound() throws Exception {
+        scriptResponses("{\"id\":\"r\",\"content\":[{\"type\":\"tool_use\",\"id\":\"c\",\"name\":\"f\",\"input\":{}}],\"stop_reason\":\"tool_use\"}");
+        ToolCallback abort = new ToolCallback() {
+            public ToolDefinition getToolDefinition() { return ToolDefinition.builder().name("f").description("f").inputSchema("{}").build(); }
+            public String call(String input) { throw new ai.kukuvaia.provider.transport.ToolCallAbortedException("limit reached"); }
+        };
+        assertThatThrownBy(() -> transport.call(promptWithTool("hi", abort)))
+                .isInstanceOf(ai.kukuvaia.provider.transport.ToolCallAbortedException.class);
+        verify(httpClient, times(1)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
+    }
+
+    private static byte[] extractBody(HttpRequest request) throws Exception {
+        var completed = new java.util.concurrent.CompletableFuture<byte[]>();
+        var bytes = new java.io.ByteArrayOutputStream();
+        request.bodyPublisher().orElseThrow().subscribe(new java.util.concurrent.Flow.Subscriber<java.nio.ByteBuffer>() {
+            public void onSubscribe(java.util.concurrent.Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
+            public void onNext(java.nio.ByteBuffer buffer) {
+                byte[] chunk = new byte[buffer.remaining()];
+                buffer.get(chunk);
+                bytes.writeBytes(chunk);
+            }
+            public void onError(Throwable error) { completed.completeExceptionally(error); }
+            public void onComplete() { completed.complete(bytes.toByteArray()); }
+        });
+        return completed.get(1, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     @Test

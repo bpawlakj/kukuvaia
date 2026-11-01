@@ -54,6 +54,10 @@ public final class OpenAiChatCompletionsTransport implements ChatTransport {
         if (requestOptions != null) {
             merged.combineWith(requestOptions.mutate());
         }
-        return prompt.mutate().chatOptions(merged.build()).build();
+        Integer cap = ai.kukuvaia.provider.transport.OutputTokenLimits.effective(prompt,
+                ai.kukuvaia.provider.transport.OutputTokenLimits.requested(modelDefaults));
+        ChatOptions options = cap == null ? merged.build()
+                : ai.kukuvaia.provider.transport.OutputTokenLimits.cap(merged.build(), cap);
+        return prompt.mutate().chatOptions(options).build();
     }
 }

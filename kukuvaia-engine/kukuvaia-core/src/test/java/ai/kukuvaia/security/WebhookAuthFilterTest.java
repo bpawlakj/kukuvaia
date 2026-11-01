@@ -111,7 +111,23 @@ class WebhookAuthFilterTest {
     }
 
     @Test
-    @DisplayName("correct bearer token passes; wrong token is rejected")
+    @DisplayName("D3 review #1: bearer-authenticated body larger than the limit is rejected with 413 too")
+    void oversizedPayload_bearer_rejected() throws Exception {
+        var filter = new WebhookAuthFilter("", TOKEN, true);
+        var request = webhook(BODY);
+        request.setContent(new byte[WebhookAuthFilter.MAX_BODY_BYTES + 1]);
+        request.addHeader("Authorization", "Bearer " + TOKEN);
+        var response = new MockHttpServletResponse();
+        var chain = new RecordingChain();
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(chain.invoked).isFalse();
+        assertThat(response.getStatus()).isEqualTo(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+    }
+
+    @Test
+    @DisplayName("correct bearer token passes (body replayed to the controller); wrong token is rejected")
     void bearerToken() throws Exception {
         var filter = new WebhookAuthFilter("", TOKEN, true);
 
@@ -120,6 +136,7 @@ class WebhookAuthFilterTest {
         var okChain = new RecordingChain();
         filter.doFilter(ok, new MockHttpServletResponse(), okChain);
         assertThat(okChain.invoked).isTrue();
+        assertThat(okChain.bodySeen.get()).isEqualTo(BODY);
 
         var bad = webhook(BODY);
         bad.addHeader("Authorization", "Bearer " + TOKEN + "x");

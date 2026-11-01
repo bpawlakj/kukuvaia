@@ -7,6 +7,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Guards against daemon token cost explosion.
@@ -31,8 +33,75 @@ public class DaemonBudgetGuard {
 
     private final JdbcTemplate jdbc;
 
+    /**
+     * Tokens reserved by runs that are admitted but not yet settled. Reservations make the daily
+     * cap a hard stop under concurrency: without them N concurrent runs could all pass the check
+     * before any usage is recorded. Single-JVM (in-memory), like {@link DaemonScheduleGuard}.
+     */
+    private long reservedTokens;
+    private record PendingUsage(int actual, int held) {}
+    private final Map<Long, PendingUsage> pendingUsage = new LinkedHashMap<>();
+
     public DaemonBudgetGuard(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /**
+     * Reserve {@code tokens} of today's budget for a run that is about to start.
+     *
+     * @return {@code false} if recorded usage + outstanding reservations + {@code tokens} would
+     *         exceed the daily budget (the run must not start)
+     */
+    public synchronized boolean tryReserve(int tokens) {
+        retryPendingUsage();
+        int todayUsage = getTodayTokenUsage();
+        long committed = todayUsage + reservedTokens();
+        if (committed + tokens > dailyTokenBudget) {
+            log.warn("Daemon daily token budget would be exceeded: {} used + {} reserved + {} requested > {}",
+                    todayUsage, reservedTokens, tokens, dailyTokenBudget);
+            return false;
+        }
+        reservedTokens += tokens;
+        double ratio = (double) (committed + tokens) / dailyTokenBudget;
+        if (ratio >= alertThreshold) {
+            log.warn("Daemon token usage at {}% (incl. reservations): {}/{} tokens today",
+                    Math.round(ratio * 100), committed + tokens, dailyTokenBudget);
+        }
+        return true;
+    }
+
+    /** Return an unused reservation (run skipped or settled). */
+    public synchronized void releaseReservation(int tokens) {
+        reservedTokens = Math.max(0, reservedTokens - tokens);
+    }
+
+    /** Persist conservative usage before work starts, atomically replacing its in-memory reservation. */
+    public synchronized void precharge(long taskId, int reserved, int cumulativeTokens) {
+        recordUsage(taskId, cumulativeTokens);
+        releaseReservation(reserved);
+    }
+
+    /** Record actual usage; a failed write becomes retryable debt instead of free budget. */
+    public synchronized void settle(long taskId, int reserved, int actualTokens) {
+        try {
+            recordUsage(taskId, actualTokens);
+            releaseReservation(reserved);
+        } catch (RuntimeException e) {
+            int previous = pendingUsage.containsKey(taskId) ? pendingUsage.get(taskId).held() : 0;
+            pendingUsage.put(taskId, new PendingUsage(actualTokens, Math.max(previous, Math.max(reserved, actualTokens))));
+            releaseReservation(reserved);
+            throw e;
+        }
+    }
+
+    /** Outstanding reservations (monitoring / API). */
+    public synchronized long reservedTokens() {
+        return reservedTokens + pendingUsage.values().stream().mapToLong(PendingUsage::held).sum();
+    }
+
+    /** Configured daily budget (monitoring / API). */
+    public int dailyTokenBudget() {
+        return dailyTokenBudget;
     }
 
     /**
@@ -66,14 +135,42 @@ public class DaemonBudgetGuard {
     /**
      * Record token usage for a completed daemon task.
      */
-    public void recordUsage(long taskId, int tokenCount) {
-        jdbc.update(
+    public synchronized void recordUsage(long taskId, int tokenCount) {
+        writeUsage(taskId, tokenCount);
+        pendingUsage.remove(taskId);
+        try {
+            int todayTotal = getTodayTokenUsage();
+            log.info("Daemon token usage: {} tokens (task {}), daily total: {}/{}",
+                    tokenCount, taskId, todayTotal, dailyTokenBudget);
+        } catch (RuntimeException e) {
+            // The UPDATE is already durable. Monitoring must not turn a successful charge into debt.
+            log.warn("Usage for task {} persisted, but daily usage could not be logged", taskId, e);
+        }
+    }
+
+    private void writeUsage(long taskId, int tokenCount) {
+        int updated = jdbc.update(
                 "UPDATE kukuvaia_agent.daemon_tasks SET token_usage = ? WHERE id = ?",
                 tokenCount, taskId);
+        if (updated != 1) throw new IllegalStateException("Daemon task not found while recording usage: " + taskId);
+    }
 
-        int todayTotal = getTodayTokenUsage();
-        log.info("Daemon token usage: +{} tokens (task {}), daily total: {}/{}",
-                tokenCount, taskId, todayTotal, dailyTokenBudget);
+    private void retryPendingUsage() {
+        var pending = pendingUsage.entrySet().iterator();
+        while (pending.hasNext()) {
+            var entry = pending.next();
+            try {
+                writeUsage(entry.getKey(), entry.getValue().actual());
+                pending.remove();
+            } catch (RuntimeException e) {
+                log.warn("Usage settlement for task {} remains pending", entry.getKey(), e);
+            }
+        }
+    }
+
+    /** Tokens recorded today across all daemon tasks. */
+    public int todayTokenUsage() {
+        return getTodayTokenUsage();
     }
 
     /**
@@ -86,7 +183,7 @@ public class DaemonBudgetGuard {
     private int getTodayTokenUsage() {
         Integer usage = jdbc.queryForObject(
                 "SELECT COALESCE(SUM(token_usage), 0) FROM kukuvaia_agent.daemon_tasks " +
-                "WHERE created_at >= ?::date AND token_usage IS NOT NULL",
+                "WHERE COALESCE(started_at, created_at) >= ?::date AND token_usage IS NOT NULL",
                 Integer.class,
                 LocalDate.now());
         return usage != null ? usage : 0;

@@ -103,6 +103,14 @@ public class ChatModelCache {
         return models;
     }
 
+    /** Names of the worker roles (worker, worker-2, …), sorted. */
+    public List<String> getWorkerRoles() {
+        return roleIndex.keySet().stream()
+                .filter(r -> r.equals("worker") || r.startsWith("worker-"))
+                .sorted()
+                .toList();
+    }
+
     /** No-op — config is static; kept for call-site compatibility. */
     public void invalidateModel(UUID modelId) {
         modelCache.remove(modelId);
@@ -175,6 +183,18 @@ public class ChatModelCache {
     public Optional<ModelRecord> getModelRecord(String modelId) {
         ProviderModelPair pair = configIndex.get(modelId);
         return pair == null ? Optional.empty() : Optional.of(pair.model());
+    }
+
+    /**
+     * The provider behind a routing role, or empty if the role is not assigned.
+     * Used by the daemon provider policy to refuse Copilot for unattended work.
+     */
+    public Optional<ProviderRecord> getProviderForRole(String role) {
+        UUID modelUuid = roleIndex.get(role);
+        if (modelUuid == null) return Optional.empty();
+        String modelId = uuidToModelId.get(modelUuid);
+        ProviderModelPair pair = modelId == null ? null : configIndex.get(modelId);
+        return pair == null ? Optional.empty() : Optional.of(pair.provider());
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────

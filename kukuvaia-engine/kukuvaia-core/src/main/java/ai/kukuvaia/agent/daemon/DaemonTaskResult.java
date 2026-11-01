@@ -22,6 +22,11 @@ public record DaemonTaskResult(
 ) {
 
     public enum DaemonTaskStatus {
-        PENDING, RUNNING, COMPLETED, FAILED
+        QUEUED, RUNNING, COMPLETED, FAILED, TIMEOUT, SKIPPED, CANCELLED;
+
+        /** Final states — the run will not change any more. */
+        public boolean isTerminal() {
+            return this != QUEUED && this != RUNNING;
+        }
     }
 }
