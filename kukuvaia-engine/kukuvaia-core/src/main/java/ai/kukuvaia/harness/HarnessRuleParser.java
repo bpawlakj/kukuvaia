@@ -1,9 +1,9 @@
 package ai.kukuvaia.harness;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.yaml.YAMLFactory;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +45,7 @@ final class HarnessRuleParser {
         Map<String, Object> meta;
         try {
             meta = YAML.readValue(frontmatterYaml, Map.class);
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             throw new IllegalArgumentException("rule '" + name + "': invalid YAML frontmatter — "
                     + e.getMessage(), e);
         }

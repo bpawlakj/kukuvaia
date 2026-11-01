@@ -19,7 +19,7 @@ dependencies {
     api 'org.springframework.boot:spring-boot-starter-jdbc'
 
     // Jackson — used everywhere for JSON serialisation of request/response bodies
-    api 'com.fasterxml.jackson.core:jackson-databind'
+    api 'tools.jackson.core:jackson-databind'
 
     // Observability hook for ProviderAuditLog
     api 'io.micrometer:micrometer-core'

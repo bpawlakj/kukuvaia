@@ -3,20 +3,21 @@ package ai.kukuvaia.agentrun;
 import ai.kukuvaia.agent.PersonaService;
 import ai.kukuvaia.agent.PersonaSpec;
 import ai.kukuvaia.memory.embedding.EmbeddingService;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.expression.MapAccessor;
 import org.springframework.expression.Expression;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.expression.spel.support.DataBindingPropertyAccessor;
+import org.springframework.expression.spel.support.MapAccessor;
+import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
@@ -292,11 +293,16 @@ public class AgentRunService {
             root.put("prompt_tokens", usage.promptTokens());
             root.put("completion_tokens", usage.completionTokens());
             root.put("total_tokens", usage.totalTokens());
-            StandardEvaluationContext ctx = new StandardEvaluationContext(root);
-            // MapAccessor lets dot-notation work on Map values: `output.needs_escalation` instead
-            // of `output['needs_escalation']`. SpEL's default property accessor only sees JavaBean
-            // properties on the root.
-            ctx.addPropertyAccessor(new MapAccessor());
+            // SECURITY: the expression arrives in the API request body, so it is untrusted.
+            // SimpleEvaluationContext forbids type references (T(...)), constructors, bean
+            // references and method calls — a StandardEvaluationContext would allow remote code
+            // execution, e.g. T(java.lang.Runtime).getRuntime().exec(...).
+            // The read-only MapAccessor lets dot-notation work on Map values
+            // (`output.needs_escalation` instead of `output['needs_escalation']`).
+            SimpleEvaluationContext ctx = SimpleEvaluationContext
+                    .forPropertyAccessors(new MapAccessor(false), DataBindingPropertyAccessor.forReadOnlyAccess())
+                    .withRootObject(root)
+                    .build();
             // Also surface as variables so `#output.foo` works for callers that prefer that form.
             root.forEach(ctx::setVariable);
             Expression expr = spel.parseExpression(expression);

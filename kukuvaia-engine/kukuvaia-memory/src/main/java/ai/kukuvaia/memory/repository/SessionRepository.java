@@ -133,7 +133,7 @@ public class SessionRepository {
         }
         try {
             @SuppressWarnings("unchecked")
-            var map = new com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map.class);
+            var map = new tools.jackson.databind.ObjectMapper().readValue(json, Map.class);
             return map;
         } catch (Exception e) {
             log.warn("Failed to parse session metadata JSON: {}", e.getMessage());

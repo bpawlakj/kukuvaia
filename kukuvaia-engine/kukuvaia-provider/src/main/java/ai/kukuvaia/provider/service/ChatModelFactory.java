@@ -6,18 +6,16 @@ import ai.kukuvaia.provider.transport.TransportChatModelAdapter;
 import ai.kukuvaia.provider.transport.TransportSpec;
 import ai.kukuvaia.provider.transport.anthropic.AnthropicMessagesTransport;
 import ai.kukuvaia.provider.transport.openai.OpenAiChatCompletionsTransport;
+import ai.kukuvaia.provider.transport.openai.OpenAiSdkClients;
 import ai.kukuvaia.provider.transport.openai.OpenAiResponsesTransport;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
-import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.client.ReactorClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 
 import java.net.ProxySelector;
 import java.net.http.HttpClient;
@@ -43,20 +41,30 @@ public class ChatModelFactory {
     private final ChatTransportFactory transportFactory;
     private final ObjectMapper objectMapper;
     private final HttpClient sharedHttpClient;
+    private final Duration requestTimeout;
+    private final Duration connectTimeout;
+    private final int maxRetries;
 
-    @Value("${kukuvaia.llm.request-timeout:120}")
-    private int requestTimeoutSeconds;
-
-    @Value("${kukuvaia.llm.connect-timeout:10}")
-    private int connectTimeoutSeconds;
-
-    public ChatModelFactory(ChatTransportFactory transportFactory, ObjectMapper objectMapper) {
+    /**
+     * @param requestTimeoutSeconds {@code kukuvaia.llm.request-timeout} — whole-request timeout
+     * @param connectTimeoutSeconds {@code kukuvaia.llm.connect-timeout} — TCP connect timeout
+     * @param maxAttempts           {@code spring.ai.retry.max-attempts} — total attempts per call
+     *                              for the Chat Completions transport (retries = attempts - 1)
+     */
+    public ChatModelFactory(ChatTransportFactory transportFactory,
+                            ObjectMapper objectMapper,
+                            @Value("${kukuvaia.llm.request-timeout:120}") int requestTimeoutSeconds,
+                            @Value("${kukuvaia.llm.connect-timeout:10}") int connectTimeoutSeconds,
+                            @Value("${spring.ai.retry.max-attempts:2}") int maxAttempts) {
         this.transportFactory = transportFactory;
         this.objectMapper = objectMapper;
+        this.requestTimeout = Duration.ofSeconds(requestTimeoutSeconds);
+        this.connectTimeout = Duration.ofSeconds(connectTimeoutSeconds);
+        this.maxRetries = Math.max(0, maxAttempts - 1);
         // Single HttpClient shared by all custom transports — honours system proxy and
         // the JVM-wide DNS TTL set in KukuvaiaApplication.
         this.sharedHttpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(connectTimeout)
                 .proxy(ProxySelector.getDefault())
                 .build();
     }
@@ -72,7 +80,7 @@ public class ChatModelFactory {
 
         TransportSpec spec = transportFactory.resolve(provider, model);
         ChatTransport transport = buildTransport(spec, provider, model);
-        OpenAiChatOptions defaultOptions = buildDefaultOptions(model);
+        OpenAiChatOptions defaultOptions = buildDefaultOptions(model).build();
 
         log.info("Created ChatModel: provider={}, model={}, transport={}, source={}",
                 provider.name(), model.modelId(), transport.describe(), spec.source());
@@ -82,12 +90,13 @@ public class ChatModelFactory {
     private ChatTransport buildTransport(TransportSpec spec, ProviderRecord provider, ModelRecord model) {
         return switch (spec.type()) {
             case OPENAI_CHAT_COMPLETIONS -> new OpenAiChatCompletionsTransport(
-                    buildOpenAiChatModel(spec, provider, model), spec);
+                    buildOpenAiChatModel(spec, model), spec,
+                    buildDefaultOptions(model).extraBody(resolveExtraBody(provider.config())).build());
             case OPENAI_RESPONSES -> new OpenAiResponsesTransport(
-                    spec, model, sharedHttpClient, objectMapper, Duration.ofSeconds(requestTimeoutSeconds));
+                    spec, model, sharedHttpClient, objectMapper, requestTimeout);
             case ANTHROPIC_MESSAGES -> new AnthropicMessagesTransport(
                     spec, model, sharedHttpClient, objectMapper,
-                    Duration.ofSeconds(requestTimeoutSeconds),
+                    requestTimeout,
                     resolveAuthHeader(provider));
         };
     }
@@ -105,41 +114,71 @@ public class ChatModelFactory {
         return s.isBlank() ? "Authorization" : s;
     }
 
-    private ChatModel buildOpenAiChatModel(TransportSpec spec, ProviderRecord provider, ModelRecord model) {
-        var requestFactory = new ReactorClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(Duration.ofSeconds(connectTimeoutSeconds));
-        requestFactory.setReadTimeout(Duration.ofSeconds(requestTimeoutSeconds));
-
-        RestClient.Builder restClientBuilder = RestClient.builder().requestFactory(requestFactory);
-        spec.extraHeaders().forEach(restClientBuilder::defaultHeader);
-
-        OpenAiApi.Builder apiBuilder = OpenAiApi.builder()
-                .baseUrl(spec.baseUrl())
-                .apiKey(spec.apiKey())
-                .restClientBuilder(restClientBuilder)
-                .completionsPath(spec.path());
-
-        OpenAiChatOptions options = buildDefaultOptions(model);
-        log.debug("[factory] OpenAI ChatCompletions transport: path={} headers={}", spec.path(), spec.extraHeaders().keySet());
+    /**
+     * Spring AI 2.x builds {@link OpenAiChatModel} on the official {@code openai-java} SDK
+     * (OkHttp). The SDK clients are built by {@link OpenAiSdkClients} so connect timeout,
+     * request timeout, retries and provider headers are all applied at client level. The SDK
+     * always appends {@code /chat/completions} to the base
+     * URL, so the configured path is translated by {@link #sdkBaseUrl(TransportSpec)}.
+     */
+    private ChatModel buildOpenAiChatModel(TransportSpec spec, ModelRecord model) {
+        var clients = new OpenAiSdkClients(sdkBaseUrl(spec), spec.apiKey(), connectTimeout, requestTimeout,
+                maxRetries, spec.extraHeaders());
+        OpenAiChatOptions options = buildDefaultOptions(model).build();
+        log.debug("[factory] OpenAI ChatCompletions transport: path={} headers={} maxRetries={}",
+                spec.path(), spec.extraHeaders().keySet(), maxRetries);
 
         return OpenAiChatModel.builder()
-                .openAiApi(apiBuilder.build())
-                .defaultOptions(options)
+                .openAiClient(clients.sync())
+                .openAiClientAsync(clients.async())
+                .options(options)
                 .build();
     }
 
-    private OpenAiChatOptions buildDefaultOptions(ModelRecord model) {
+    /**
+     * Optional {@code provider.config.extra-body}: extra top-level JSON fields sent with every
+     * Chat Completions request. Opt-in, because strict providers (api.openai.com) reject unknown
+     * fields. Typical use — litellm proxies such as SmartGate, whose internal default timeout
+     * is 10 s: {@code extra-body: {request_timeout: 120}}.
+     */
+    static Map<String, Object> resolveExtraBody(Map<String, Object> config) {
+        if (config == null) return null;
+        Object value = config.get("extra-body");
+        if (!(value instanceof Map<?, ?> map) || map.isEmpty()) return null;
+        Map<String, Object> result = new LinkedHashMap<>();
+        map.forEach((k, v) -> {
+            if (k != null && v != null) result.put(k.toString(), v);
+        });
+        return result.isEmpty() ? null : Map.copyOf(result);
+    }
+
+    /**
+     * Converts {@code baseUrl + path} into the base URL the OpenAI SDK expects, i.e. the URL
+     * without the trailing {@code /chat/completions} segment the SDK appends itself.
+     */
+    static String sdkBaseUrl(TransportSpec spec) {
+        String suffix = "/chat/completions";
+        String path = spec.path();
+        if (!path.endsWith(suffix)) {
+            throw new UnsupportedTransportException(
+                    "OpenAI chat-completions path must end with '" + suffix + "' (got '" + path + "')");
+        }
+        return spec.baseUrl() + path.substring(0, path.length() - suffix.length());
+    }
+
+    private OpenAiChatOptions.Builder buildDefaultOptions(ModelRecord model) {
         double temperature = extractDouble(model.config(), "temperature", 0.2);
         boolean thinking = model.config() != null && Boolean.TRUE.equals(model.config().get("thinking"));
         String reasoningEffort = thinking ? extractString(model.config(), "reasoning_effort", "medium") : null;
 
+        // Tool execution is never done inside the ChatModel in Spring AI 2.x — ToolCallingAdvisor
+        // owns the loop — so the old internalToolExecutionEnabled(false) flag is gone.
         OpenAiChatOptions.Builder optionsBuilder = OpenAiChatOptions.builder()
                 .model(model.modelId())
                 .maxTokens(model.maxTokens())
-                .temperature(temperature)
-                .internalToolExecutionEnabled(false);
+                .temperature(temperature);
         if (reasoningEffort != null) optionsBuilder.reasoningEffort(reasoningEffort);
-        return optionsBuilder.build();
+        return optionsBuilder;
     }
 
     /* ====================== Back-compat helpers for tests ====================== */

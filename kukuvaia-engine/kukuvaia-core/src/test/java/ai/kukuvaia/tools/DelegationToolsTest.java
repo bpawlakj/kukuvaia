@@ -4,7 +4,7 @@ import ai.kukuvaia.provider.model.ExecutionContext;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.subagent.WorkerResult;
 import ai.kukuvaia.agent.subagent.WorkerTask;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

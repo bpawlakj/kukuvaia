@@ -3,7 +3,6 @@ package ai.kukuvaia.mcp;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.client.common.autoconfigure.McpSseClientConnectionDetails;
-import org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -23,7 +22,15 @@ import java.util.Map;
  * once. Hot reload is a future concern; MVP requires a restart (or a
  * context refresh) to pick up new connections. Header changes on
  * existing connections are picked up immediately via the customizer path.
+ *
+ * <p>Spring AI 2.0 deprecates the HTTP+SSE MCP transport (and with it
+ * {@code McpSseClientProperties.SseParameters}) because the MCP specification replaced it
+ * with Streamable HTTP; there is no non-deprecated SSE equivalent. Remote MCP servers that
+ * only speak SSE still need this, so the warning is suppressed deliberately. Migration path:
+ * expose {@code McpStreamableHttpClientProperties} connections once every remote server
+ * supports Streamable HTTP.
  */
+@SuppressWarnings("removal")
 public class DbMcpSseClientConnectionDetails implements McpSseClientConnectionDetails {
 
     private static final Logger log = LoggerFactory.getLogger(DbMcpSseClientConnectionDetails.class);
@@ -35,10 +42,10 @@ public class DbMcpSseClientConnectionDetails implements McpSseClientConnectionDe
     }
 
     @Override
-    public Map<String, SseParameters> getConnections() {
-        Map<String, SseParameters> out = new LinkedHashMap<>();
+    public Map<String, org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters> getConnections() {
+        Map<String, org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters> out = new LinkedHashMap<>();
         for (McpConnection c : cache.all()) {
-            out.put(c.name(), new SseParameters(c.url(), c.sseEndpoint()));
+            out.put(c.name(), new org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters(c.url(), c.sseEndpoint()));
         }
         if (out.isEmpty()) {
             log.info("MCP connection details: no enabled connections — Spring AI will register no remote tools");

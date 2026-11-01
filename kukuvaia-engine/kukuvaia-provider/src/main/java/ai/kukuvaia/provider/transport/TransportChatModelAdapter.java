@@ -34,7 +34,7 @@ public final class TransportChatModelAdapter implements ChatModel {
     }
 
     @Override
-    public ChatOptions getDefaultOptions() {
+    public ChatOptions getOptions() {
         return defaultOptions;
     }
 

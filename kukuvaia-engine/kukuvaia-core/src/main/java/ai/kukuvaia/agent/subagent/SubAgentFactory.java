@@ -123,7 +123,7 @@ public class SubAgentFactory {
                 .defaultAdvisors(
                         toolResultAdvisor         // Anti-prompt-injection in tool results
                 )
-                .defaultToolCallbacks(toolRegistry.resolveAll(safeTools))
+                .defaultTools(toolRegistry.resolveAll(safeTools))
                 .build();
 
         // Execute with timeout — prevents runaway sub-agents
@@ -275,7 +275,7 @@ public class SubAgentFactory {
         ChatClient subAgent = ChatClient.builder(chatModel)
                 .defaultSystem(safePrompt)
                 .defaultAdvisors(toolResultAdvisor)
-                .defaultToolCallbacks(toolRegistry.resolveAll(safeTools))
+                .defaultTools(toolRegistry.resolveAll(safeTools))
                 .build();
 
         long timeoutSeconds = spec.timeoutSeconds() > 0
@@ -314,7 +314,7 @@ public class SubAgentFactory {
      * Build chat options for sub-agent. Skips model override when tier-based resolution
      * was used (model already resolved from DB via role).
      */
-    private OpenAiChatOptions buildSubAgentOptions(SubAgentSpec spec) {
+    private OpenAiChatOptions.Builder buildSubAgentOptions(SubAgentSpec spec) {
         var builder = OpenAiChatOptions.builder()
                 .maxTokens(spec.maxTokens())
                 .temperature(spec.temperature());
@@ -323,7 +323,7 @@ public class SubAgentFactory {
         if (!tierResolved && spec.model() != null && !spec.model().isBlank()) {
             builder.model(spec.model());
         }
-        return builder.build();
+        return builder;
     }
 
     public static class SubAgentTimeoutException extends RuntimeException {

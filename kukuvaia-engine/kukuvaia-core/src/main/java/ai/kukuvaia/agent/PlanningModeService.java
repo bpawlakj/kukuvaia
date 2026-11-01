@@ -1,8 +1,8 @@
 package ai.kukuvaia.agent;
 
 import ai.kukuvaia.plans.PlansRepository;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -108,7 +108,7 @@ public class PlanningModeService implements BaseAdvisor {
                     UPDATE kukuvaia.plans SET discovery_facts = ?::jsonb, updated_at = NOW()
                     WHERE session_id = ? AND status = 'draft'
                     """, json, sessionId);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to serialise discovery facts: {}", e.getMessage());
         } catch (Exception e) {
             log.warn("Failed to persist facts for session={}: {}", sessionId, e.getMessage());
@@ -377,7 +377,7 @@ public class PlanningModeService implements BaseAdvisor {
         String factsJson;
         try {
             factsJson = objectMapper.writeValueAsString(merged);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             factsJson = "{}";
         }
 
@@ -488,7 +488,8 @@ public class PlanningModeService implements BaseAdvisor {
                 var filtered = aiOptions.getToolCallbacks().stream()
                         .filter(cb -> !blocked.contains(cb.getToolDefinition().name()))
                         .toList();
-                aiOptions.setToolCallbacks(filtered);
+                // Spring AI 2.x options are immutable — rebuild with the filtered tool list.
+                options = aiOptions.mutate().toolCallbacks(filtered).build();
             }
         }
 

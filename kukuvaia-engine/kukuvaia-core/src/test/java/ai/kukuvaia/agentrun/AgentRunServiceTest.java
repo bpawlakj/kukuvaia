@@ -3,9 +3,9 @@ package ai.kukuvaia.agentrun;
 import ai.kukuvaia.agent.PersonaService;
 import ai.kukuvaia.agent.PersonaSpec;
 import ai.kukuvaia.memory.embedding.EmbeddingService;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -280,6 +280,44 @@ class AgentRunServiceTest {
     }
 
     @Test
+    @DisplayName("escalation: variables and token counters still work in the restricted context")
+    void runSync_escalation_variablesAndTokens() {
+        ChatResponse first = makeResponse("{\"needs_escalation\": true}", 10, 5, "model-a");
+        ChatResponse second = makeResponse("{\"final\": \"answer\"}", 30, 15, "model-b");
+        when(callSpec.chatResponse()).thenReturn(first, second);
+
+        AgentRunSpec spec = baseSpec(JsonNodeFactory.instance.objectNode().put("a", 1),
+                /*persona*/ null,
+                new LlmFollowupSpec("SYS", null, true, false, null, false,
+                        SimilarityContextSpec.disabled(),
+                        new ModelPreferenceSpec("model-a", "model-b",
+                                "#output.needs_escalation == true and total_tokens > 10")));
+
+        service.runSync(spec);
+
+        verify(callSpec, times(2)).chatResponse();
+    }
+
+    @Test
+    @DisplayName("escalation: type references / method calls in the trigger are never executed (no SpEL RCE)")
+    void runSync_escalation_typeReferenceRejected() {
+        ChatResponse first = makeResponse("{\"x\":1}", 5, 3, "model-a");
+        when(callSpec.chatResponse()).thenReturn(first);
+
+        AgentRunSpec spec = baseSpec(JsonNodeFactory.instance.objectNode().put("a", 1),
+                /*persona*/ null,
+                new LlmFollowupSpec("SYS", null, true, false, null, false,
+                        SimilarityContextSpec.disabled(),
+                        new ModelPreferenceSpec("model-a", "model-b",
+                                "T(java.lang.System).setProperty('kukuvaia.spel.pwned', 'yes') != null")));
+
+        service.runSync(spec);
+
+        assertThat(System.getProperty("kukuvaia.spel.pwned")).isNull();
+        verify(callSpec, times(1)).chatResponse();
+    }
+
+    @Test
     @DisplayName("ChatClient throws -> markFailed with exception class as error_code")
     void runSync_chatClientThrows_markedFailed() {
         when(callSpec.chatResponse()).thenThrow(new RuntimeException("upstream timeout"));
@@ -319,7 +357,7 @@ class AgentRunServiceTest {
 
     // --- helpers ---------------------------------------------------------
 
-    private AgentRunSpec baseSpec(com.fasterxml.jackson.databind.JsonNode input,
+    private AgentRunSpec baseSpec(tools.jackson.databind.JsonNode input,
                                   String personaName,
                                   LlmFollowupSpec followup) {
         return new AgentRunSpec(

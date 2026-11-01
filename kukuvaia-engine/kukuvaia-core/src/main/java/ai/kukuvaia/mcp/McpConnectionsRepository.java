@@ -1,8 +1,8 @@
 package ai.kukuvaia.mcp;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -133,7 +133,7 @@ public class McpConnectionsRepository {
         try {
             Map<String, String> m = jsonMapper.readValue(json, HEADERS_TYPE);
             return m == null ? Map.of() : m;
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             log.warn("mcp_connections.headers JSON parse failed: {}", e.getMessage());
             return Map.of();
         }
@@ -143,7 +143,7 @@ public class McpConnectionsRepository {
         if (headers == null || headers.isEmpty()) return "{}";
         try {
             return jsonMapper.writeValueAsString(headers);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalArgumentException("headers must be serialisable as JSON object", e);
         }
     }

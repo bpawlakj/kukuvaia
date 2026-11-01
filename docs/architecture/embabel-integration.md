@@ -149,7 +149,7 @@ kukuvaia-agents/
 ├── build.gradle
 │   ├── depends on :kukuvaia-core
 │   ├── depends on :kukuvaia-memory
-│   ├── embabel-agent-starter:0.3.4
+│   ├── embabel-agent-starter:1.5.4
 │   └── kotlin-stdlib + kotlin-reflect
 └── src/main/kotlin/ai/kukuvaia/agents/
     ├── PingAgent.kt              ← framework wiring test (exists)
@@ -171,7 +171,7 @@ kukuvaia-agents/
 
 ## Current Status
 
-- **Framework**: embabel-agent-starter:0.3.4 — imported, compiles, tests pass
+- **Framework**: embabel-agent-starter:1.5.4 — imported, compiles, tests pass
 - **PingAgent**: Deterministic test agent — verifies @Agent/@Action/@AchievesGoal wiring
 - **Production agents**: None yet — planned for after kukuvaia-memory module
 
@@ -194,6 +194,6 @@ Both share:
 
 ## Version
 
-- Embabel: 0.3.4 (active development, weekly releases)
+- Embabel: 1.5.4 (active development, weekly releases)
 - Kotlin: 2.1.20
-- Spring Boot compatibility: 3.4.4+ (Embabel builds on Spring AI)
+- Spring Boot compatibility: 4.1+ / Spring AI 2.0 (Embabel 1.5 builds on Spring AI 2)

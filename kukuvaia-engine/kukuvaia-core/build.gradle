@@ -14,7 +14,7 @@ dependencies {
     api project(':kukuvaia-provider')
 
     // Spring Boot
-    api 'org.springframework.boot:spring-boot-starter-web'
+    api 'org.springframework.boot:spring-boot-starter-webmvc'
     api 'org.springframework.boot:spring-boot-starter-jdbc'
     api 'org.springframework.boot:spring-boot-starter-webflux'
     api 'org.springframework.boot:spring-boot-starter-security'
@@ -28,23 +28,24 @@ dependencies {
     api 'org.springframework.ai:spring-ai-starter-mcp-client'
 
     // Database
-    api 'org.flywaydb:flyway-core'
+    // Boot 4: Flyway auto-configuration lives in its own module — flyway-core alone no longer triggers it
+    api 'org.springframework.boot:spring-boot-starter-flyway'
     api 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
 
     // Observability — Micrometer API for custom metrics + AOP for @Tool timing
     api 'io.micrometer:micrometer-core'
-    api 'org.springframework.boot:spring-boot-starter-aop'
+    api 'org.springframework.boot:spring-boot-starter-aspectj'
 
     // LuaJ (sandboxed Lua scripting for tools and skills)
     implementation 'org.luaj:luaj-jse:3.0.1'
 
     // Dotenv (.env file support for local development)
-    implementation 'me.paulschwarz:spring-dotenv:4.0.0'
+    implementation 'me.paulschwarz:springboot4-dotenv:5.1.0'
 
     // Jackson
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
-    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+    implementation 'tools.jackson.core:jackson-databind'
+    implementation 'tools.jackson.dataformat:jackson-dataformat-yaml'
 
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

@@ -18,7 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
-import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
+import org.springframework.ai.chat.client.advisor.ToolCallingAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.tool.ToolCallback;
@@ -43,7 +43,7 @@ import java.util.Collection;
  * 7. MessageChatMemoryAdvisor  (HIGHEST_PRECEDENCE + 1000) — inject conversation history
  * 8. ConversationSummaryAdvisor(HIGHEST_PRECEDENCE + 1050) — inject persisted rolling summary (P24 Phase D)
  * 9. ContextCompactionAdvisor  (HIGHEST_PRECEDENCE + 1100) — token-threshold prompt compaction (P24 Phases A+B+D)
- * 10.ToolCallAdvisor           (default)                   — multi-round tool-calling loop
+ * 10.ToolCallingAdvisor         (default)                   — multi-round tool-calling loop
  */
 @Configuration
 public class ChatClientConfig {
@@ -89,7 +89,7 @@ public class ChatClientConfig {
                         MessageChatMemoryAdvisor.builder(chatMemory).build(),
                         conversationSummaryAdvisor,
                         contextCompactionAdvisor,
-                        ToolCallAdvisor.builder()
+                        ToolCallingAdvisor.builder()
                                 .toolCallingManager(toolCallingManager)
                                 .build()
                 );
@@ -128,7 +128,7 @@ public class ChatClientConfig {
             for (int i = 0; i < callbacks.length; i++) {
                 wrapped[i] = new McpErrorTranslatingToolCallback(callbacks[i]);
             }
-            clientBuilder.defaultToolCallbacks(wrapped);
+            clientBuilder.defaultTools((Object[]) wrapped);
         }
     }
 
@@ -162,7 +162,7 @@ public class ChatClientConfig {
                         loopDetectionAdvisor,
                         harnessAdvisor,
                         toolResultSanitizingAdvisor,
-                        ToolCallAdvisor.builder()
+                        ToolCallingAdvisor.builder()
                                 .toolCallingManager(toolCallingManager)
                                 .build()
                 );

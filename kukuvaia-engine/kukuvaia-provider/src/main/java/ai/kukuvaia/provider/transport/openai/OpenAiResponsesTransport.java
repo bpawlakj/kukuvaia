@@ -3,7 +3,7 @@ package ai.kukuvaia.provider.transport.openai;
 import ai.kukuvaia.provider.model.ModelRecord;
 import ai.kukuvaia.provider.transport.ChatTransport;
 import ai.kukuvaia.provider.transport.TransportSpec;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.model.ChatResponse;

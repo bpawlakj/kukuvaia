@@ -12,6 +12,7 @@ import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
@@ -143,12 +144,11 @@ public class ModelRoutingAdvisor implements BaseAdvisor {
                 userMessage.substring(0, Math.min(40, userMessage.length())));
 
         // Override model on the prompt — preserve existing options (tools, temperature, etc.)
-        var options = request.prompt().getOptions();
-        if (options instanceof OpenAiChatOptions aiOptions) {
-            aiOptions.setModel(modelId);
-        } else {
-            options = OpenAiChatOptions.builder().model(modelId).build();
-        }
+        // Spring AI 2.x options are immutable — rebuild instead of mutating in place.
+        var current = request.prompt().getOptions();
+        ChatOptions options = current instanceof OpenAiChatOptions aiOptions
+                ? aiOptions.mutate().model(modelId).build()
+                : OpenAiChatOptions.builder().model(modelId).build();
 
         Prompt routedPrompt = new Prompt(
                 request.prompt().getInstructions(),
