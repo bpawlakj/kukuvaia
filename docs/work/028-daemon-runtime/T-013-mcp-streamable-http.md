@@ -1,11 +1,11 @@
 ---
 id: T-013
 title: "MCP client streamable HTTP from DB + SSE auth-header fix"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 7756c8f
 depends_on: []
 blocks: [T-014]
 plan_anchor: d5--external-agents-mcp-now-a2a-spike

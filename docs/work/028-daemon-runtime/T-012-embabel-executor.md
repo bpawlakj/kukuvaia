@@ -1,11 +1,11 @@
 ---
 id: T-012
 title: "EmbabelAgentExecutor + GuardedChatModel"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 30e539f
 depends_on: [T-003, T-005]
 blocks: [T-016]
 plan_anchor: d4--embabel-executor

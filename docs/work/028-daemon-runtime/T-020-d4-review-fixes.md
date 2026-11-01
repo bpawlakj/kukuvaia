@@ -1,11 +1,11 @@
 ---
 id: T-020
 title: "Follow-up to T-012: close D4 security-review findings"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: a509456
 depends_on: [T-012]
 blocks: [T-016]
 plan_anchor: d4--embabel-executor
