@@ -103,6 +103,14 @@ public class ChatModelCache {
         return models;
     }
 
+    /** Names of the worker roles (worker, worker-2, …), sorted. */
+    public List<String> getWorkerRoles() {
+        return roleIndex.keySet().stream()
+                .filter(r -> r.equals("worker") || r.startsWith("worker-"))
+                .sorted()
+                .toList();
+    }
+
     /** No-op — config is static; kept for call-site compatibility. */
     public void invalidateModel(UUID modelId) {
         modelCache.remove(modelId);

@@ -215,6 +215,53 @@ class SubAgentFactoryCallTest {
                 ToolRoundLimiter.EXHAUSTED_RESULT, ToolRoundLimiter.EXHAUSTED_RESULT);
     }
 
+    /** A model that requests the echo tool {@code toolRounds} times, reporting usage on every round. */
+    private ChatModel toolLoopModel(int toolRounds, int promptPerRound, int completionPerRound) {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        return new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                int n = calls.incrementAndGet();
+                var usage = ChatResponseMetadata.builder()
+                        .usage(new DefaultUsage(promptPerRound, completionPerRound)).build();
+                if (n <= toolRounds) {
+                    var call = new AssistantMessage.ToolCall("c" + n, "function", "echo", "{}");
+                    return new ChatResponse(List.of(new Generation(
+                            AssistantMessage.builder().content("").toolCalls(List.of(call)).build())), usage);
+                }
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("final"))), usage);
+            }
+
+            @Override
+            public org.springframework.ai.chat.prompt.ChatOptions getOptions() {
+                return org.springframework.ai.openai.OpenAiChatOptions.builder().build();
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("review: token usage is cumulative across tool rounds (not just the last response)")
+    void executeForResult_usageCumulativeAcrossRounds() {
+        when(providerService.resolve(any(), any())).thenReturn(toolLoopModel(2, 10, 2));
+
+        SubAgentResult result = factory.executeForResult("task", "looper", ExecutionContext.DAEMON, null, 0, null);
+
+        assertThat(result.content()).isEqualTo("final");
+        // 3 model calls (2 tool rounds + final) × (10 prompt + 2 completion)
+        assertThat(result.promptTokens()).isEqualTo(30);
+        assertThat(result.completionTokens()).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("review: a model that ignores the exhausted budget gets the call ended")
+    void executeForResult_ignoringBudget_endsCall() {
+        when(providerService.resolve(any(), any())).thenReturn(toolLoopModel(50, 1, 1));
+
+        assertThatThrownBy(() -> factory.executeForResult("task", "looper", ExecutionContext.DAEMON, null, 0, null))
+                .isInstanceOf(ToolRoundLimiter.ToolBudgetExceededException.class);
+        assertThat(echoInvocations.get()).isEqualTo(2);
+    }
+
     @Test
     @DisplayName("String execute(...) keeps working as a thin wrapper")
     void execute_stringOverload() {

@@ -17,17 +17,26 @@ import java.util.concurrent.atomic.AtomicInteger;
  * so the model can still produce a final answer with what it has (instead of the whole call
  * failing). This is one of the three mandatory sub-agent DoS controls (AGENTS.md), next to
  * {@code max_tokens} and the call timeout.
+ *
+ * <p>Two hard stops end the call instead of answering: a model that keeps asking for tools after
+ * {@link #GRACE_REFUSALS} refusals (it ignores the budget), and any tool call after the sub-agent
+ * call was cancelled ({@link #close()} on timeout, or the thread was interrupted) — so an abandoned
+ * call cannot keep reaching tools in the background.
  */
 public final class ToolRoundLimiter {
 
     static final String EXHAUSTED_RESULT =
             "Tool budget exhausted for this task. Do not call more tools — answer with what you have.";
 
+    /** Refused calls tolerated after the budget is spent before the call is ended. */
+    static final int GRACE_REFUSALS = 3;
+
     private static final Logger log = LoggerFactory.getLogger(ToolRoundLimiter.class);
 
     private final String specialist;
     private final int maxCalls;
     private final AtomicInteger calls = new AtomicInteger();
+    private volatile boolean closed;
 
     public ToolRoundLimiter(String specialist, int maxCalls) {
         this.specialist = specialist;
@@ -44,17 +53,38 @@ public final class ToolRoundLimiter {
         return wrapped;
     }
 
+    /** Refuse every further tool call of this sub-agent call (it timed out or was cancelled). */
+    public void close() {
+        closed = true;
+    }
+
     /** Number of tool invocations attempted so far (including refused ones). */
     public int attempted() {
         return calls.get();
     }
 
     private boolean tryConsume(String toolName) {
+        if (closed || Thread.currentThread().isInterrupted()) {
+            throw new ToolBudgetExceededException("Sub-agent '%s' was cancelled — tool '%s' not executed"
+                    .formatted(specialist, toolName));
+        }
         int n = calls.incrementAndGet();
         if (n <= maxCalls) return true;
+        int refused = n - maxCalls;
+        if (refused > GRACE_REFUSALS) {
+            throw new ToolBudgetExceededException(("Sub-agent '%s' kept calling tools after max_tool_rounds=%d "
+                    + "was exhausted — call ended").formatted(specialist, maxCalls));
+        }
         log.warn("Sub-agent '{}' exceeded max_tool_rounds={} — refused call #{} to tool '{}'",
                 specialist, maxCalls, n, toolName);
         return false;
+    }
+
+    /** Ends the sub-agent call: thrown through Spring AI's tool loop (not a ToolExecutionException). */
+    public static final class ToolBudgetExceededException extends IllegalStateException {
+        public ToolBudgetExceededException(String message) {
+            super(message);
+        }
     }
 
     private final class Limited implements ToolCallback {

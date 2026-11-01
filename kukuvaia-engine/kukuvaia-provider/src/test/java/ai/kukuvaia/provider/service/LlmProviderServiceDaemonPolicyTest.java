@@ -117,4 +117,38 @@ class LlmProviderServiceDaemonPolicyTest {
         assertThat(LlmProviderService.isCopilot(SMARTGATE)).isFalse();
         assertThat(LlmProviderService.isCopilot(provider("x", "openai", "https://notgithubcopilot.com"))).isFalse();
     }
+
+    @Test
+    @DisplayName("review #1: DAEMON parallel workers exclude Copilot-backed and metadata-less worker roles")
+    void daemon_workerModels_excludeCopilot() {
+        ChatModel worker2 = mock(ChatModel.class);
+        when(cache.getWorkerRoles()).thenReturn(java.util.List.of("worker", "worker-2", "worker-3"));
+        role("worker", copilotModel, COPILOT);
+        role("worker-2", worker2, SMARTGATE);
+        when(cache.getByRole("worker-3")).thenReturn(mock(ChatModel.class));
+        when(cache.getProviderForRole("worker-3")).thenReturn(Optional.empty());
+
+        assertThat(service.resolveWorkerModels(ExecutionContext.DAEMON)).containsExactly(worker2);
+    }
+
+    @Test
+    @DisplayName("review #2: DAEMON refuses an assigned role without provider metadata (fail closed)")
+    void daemon_missingProviderMetadata_refused() {
+        when(cache.getByRole("daemon")).thenReturn(smartGateModel);
+        when(cache.getProviderForRole("daemon")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.resolve(null, ExecutionContext.DAEMON))
+                .isInstanceOf(LlmProviderService.DaemonProviderPolicyException.class)
+                .hasMessageContaining("provider metadata");
+    }
+
+    @Test
+    @DisplayName("review #7: explicit 'supervisor' that maps to Copilot is not the Copilot opt-in")
+    void daemon_explicitNonCopilotNameMappedToCopilot_refused() {
+        role("supervisor", copilotModel, COPILOT);
+
+        assertThatThrownBy(() -> service.resolve("supervisor", ExecutionContext.DAEMON))
+                .isInstanceOf(LlmProviderService.DaemonProviderPolicyException.class);
+        assertThat(service.resolve("supervisor", ExecutionContext.INTERACTIVE)).isSameAs(copilotModel);
+    }
 }

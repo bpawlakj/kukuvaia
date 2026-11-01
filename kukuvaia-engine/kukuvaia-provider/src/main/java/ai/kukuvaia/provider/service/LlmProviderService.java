@@ -83,6 +83,12 @@ public class LlmProviderService {
             // 1. Try as role name via config-backed cache
             ChatModel byRole = chatModelCache.getByRole(explicitProvider);
             if (byRole != null) {
+                if (context == ExecutionContext.DAEMON) {
+                    // Only a request that names Copilot itself is the opt-in — "provider: supervisor"
+                    // that happens to map to Copilot is not.
+                    checkDaemonRole(explicitProvider, "explicit provider '" + explicitProvider + "'",
+                            isCopilotName(explicitProvider));
+                }
                 log.debug("Resolved '{}' as role for context {}", explicitProvider, context);
                 return byRole;
             }
@@ -139,7 +145,7 @@ public class LlmProviderService {
     public ChatModel resolveByRole(String role, ExecutionContext context) {
         ChatModel model = resolveByRole(role);
         if (context == ExecutionContext.DAEMON) {
-            refuseCopilot(role, "tier '" + role + "'");
+            checkDaemonRole(role, "tier '" + role + "'", false);
         }
         return model;
     }
@@ -152,6 +158,29 @@ public class LlmProviderService {
      */
     public List<ChatModel> resolveWorkerModels() {
         return chatModelCache.getWorkerModels();
+    }
+
+    /**
+     * Worker models for parallel execution in the given context. Under DAEMON, Copilot-backed worker
+     * roles (and roles without provider metadata) are dropped — the caller then falls back to
+     * per-specialist resolution, which applies the daemon policy.
+     */
+    public List<ChatModel> resolveWorkerModels(ExecutionContext context) {
+        if (context != ExecutionContext.DAEMON) {
+            return resolveWorkerModels();
+        }
+        var models = new java.util.ArrayList<ChatModel>();
+        for (String role : chatModelCache.getWorkerRoles()) {
+            Optional<ProviderRecord> provider = chatModelCache.getProviderForRole(role);
+            if (provider.isEmpty() || isCopilot(provider.get())) {
+                log.warn("Daemon parallel work skips worker role '{}' ({})", role,
+                        provider.isEmpty() ? "no provider metadata" : "Copilot is opt-in only");
+                continue;
+            }
+            ChatModel model = chatModelCache.getByRole(role);
+            if (model != null) models.add(model);
+        }
+        return models;
     }
 
     public boolean isAvailable(String name) {
@@ -172,13 +201,13 @@ public class LlmProviderService {
         }
         ChatModel daemonModel = chatModelCache.getByRole(daemonDefaultRole);
         if (daemonModel != null) {
-            refuseCopilot(daemonDefaultRole, "daemon default role '" + daemonDefaultRole + "'");
+            checkDaemonRole(daemonDefaultRole, "daemon default role '" + daemonDefaultRole + "'", false);
             log.debug("Resolved daemon default role '{}'", daemonDefaultRole);
             return daemonModel;
         }
         ChatModel supervisor = chatModelCache.getByRole(DEFAULT_ROLE);
         if (supervisor != null) {
-            refuseCopilot(DEFAULT_ROLE, "supervisor fallback (no '" + daemonDefaultRole + "' role configured)");
+            checkDaemonRole(DEFAULT_ROLE, "supervisor fallback (no '" + daemonDefaultRole + "' role configured)", false);
             log.info("No '{}' role configured — daemon work uses the supervisor role", daemonDefaultRole);
             return supervisor;
         }
@@ -191,9 +220,17 @@ public class LlmProviderService {
         throw new ProviderNotAvailableException(daemonDefaultRole);
     }
 
-    private void refuseCopilot(String role, String how) {
+    /**
+     * Daemon check for a resolved role. Fails closed: a role without provider metadata cannot be
+     * proven non-Copilot and is refused; a Copilot provider is refused unless {@code copilotOptIn}.
+     */
+    private void checkDaemonRole(String role, String how, boolean copilotOptIn) {
         Optional<ProviderRecord> provider = chatModelCache.getProviderForRole(role);
-        if (provider.isPresent() && isCopilot(provider.get())) {
+        if (provider.isEmpty()) {
+            throw new DaemonProviderPolicyException(how + " has no provider metadata",
+                    "cannot verify the provider behind " + how);
+        }
+        if (isCopilot(provider.get()) && !copilotOptIn) {
             throw new DaemonProviderPolicyException(how);
         }
     }
@@ -233,6 +270,10 @@ public class LlmProviderService {
             super(("Daemon work must not run on GitHub Copilot implicitly (%s resolves to a Copilot provider). "
                     + "Configure the daemon role for SmartGate, or set provider: copilot explicitly on the job.")
                     .formatted(how));
+        }
+
+        DaemonProviderPolicyException(String how, String reason) {
+            super("Daemon provider policy refused %s: %s".formatted(how, reason));
         }
     }
 }

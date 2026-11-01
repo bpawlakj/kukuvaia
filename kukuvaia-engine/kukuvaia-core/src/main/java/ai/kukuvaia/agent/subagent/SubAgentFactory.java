@@ -175,7 +175,8 @@ public class SubAgentFactory {
         guard.validateParallelCount(tasks.size());
 
         // Resolve available worker models for round-robin distribution
-        List<ChatModel> workerModels = providerService.resolveWorkerModels();
+        // Context-aware: under DAEMON, Copilot-backed worker roles are excluded (opt-in only).
+        List<ChatModel> workerModels = providerService.resolveWorkerModels(context);
         if (workerModels.isEmpty()) {
             log.warn("No worker models configured — falling back to default resolution per specialist");
         } else {
@@ -304,11 +305,13 @@ public class SubAgentFactory {
         try {
             return call.get(timeoutSeconds, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            // Interrupt the in-flight call instead of letting it run on in the background.
+            // Stop the call reaching tools, then interrupt it instead of letting it run on.
+            toolLimiter.close();
             call.cancel(true);
             log.error("Sub-agent '{}' timed out after {}s — call cancelled", specialistType, timeoutSeconds);
             throw new SubAgentTimeoutException(specialistType, timeoutSeconds);
         } catch (InterruptedException e) {
+            toolLimiter.close();
             call.cancel(true);
             Thread.currentThread().interrupt();
             throw new RuntimeException("Sub-agent execution interrupted", e);
