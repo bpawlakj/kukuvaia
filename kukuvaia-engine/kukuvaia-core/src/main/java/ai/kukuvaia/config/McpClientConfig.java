@@ -28,6 +28,7 @@ import java.net.http.HttpRequest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Wires kukuvaia's DB-backed MCP connection registry into Spring AI's
@@ -88,28 +89,40 @@ public class McpClientConfig {
         return new PerConnectionHeaderCustomizer(cache, System::getenv);
     }
 
-    /** Applies the per-connection headers to SSE transports (Spring AI's SSE autoconfig does not). */
+    /** Upper bound for one MCP response body (protects the heap from a hostile or broken server). */
+    static final int MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+    /**
+     * Applies the connection's own headers to its SSE transport (Spring AI's SSE autoconfig does not apply
+     * any request customizer). The transport name is the connection name.
+     */
     @Bean
-    McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(
-            McpSyncHttpClientRequestCustomizer mcpRequestHeaderCustomizer) {
-        return (name, builder) -> builder.httpRequestCustomizer(mcpRequestHeaderCustomizer);
+    McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(McpConnectionsCache cache) {
+        return sseHeaderCustomizer(cache, System::getenv);
+    }
+
+    static McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(
+            McpConnectionsCache cache, PerConnectionHeaderCustomizer.EnvResolver env) {
+        return (name, builder) -> builder
+                .httpRequestCustomizer(PerConnectionHeaderCustomizer.forConnection(cache, env, name))
+                .maxResponseSize(MAX_RESPONSE_BYTES);
     }
 
     /** Streamable HTTP transports for {@code transport = streamable-http} connections. */
     @Bean
-    List<NamedClientMcpTransport> dbStreamableHttpTransports(McpConnectionsCache cache,
-                                                             McpSyncHttpClientRequestCustomizer mcpRequestHeaderCustomizer) {
-        return streamableHttpTransports(cache.all(), mcpRequestHeaderCustomizer);
+    List<NamedClientMcpTransport> dbStreamableHttpTransports(McpConnectionsCache cache) {
+        return streamableHttpTransports(cache, System::getenv);
     }
 
-    static List<NamedClientMcpTransport> streamableHttpTransports(List<McpConnection> connections,
-                                                                  McpSyncHttpClientRequestCustomizer headers) {
+    static List<NamedClientMcpTransport> streamableHttpTransports(McpConnectionsCache cache,
+                                                                  PerConnectionHeaderCustomizer.EnvResolver env) {
         List<NamedClientMcpTransport> out = new ArrayList<>();
-        for (McpConnection c : connections) {
+        for (McpConnection c : cache.all()) {
             if (!c.isStreamableHttp()) continue;
             var transport = HttpClientStreamableHttpTransport.builder(c.url())
                     .endpoint(c.endpoint())
-                    .httpRequestCustomizer(headers)
+                    .httpRequestCustomizer(PerConnectionHeaderCustomizer.forConnection(cache, env, c.name()))
+                    .maxResponseSize(MAX_RESPONSE_BYTES)
                     .build();
             out.add(new NamedClientMcpTransport(c.name(), transport));
         }
@@ -150,7 +163,8 @@ public class McpClientConfig {
                     log.info("MCP sync client initialized for connection '{}' (timeout={})",
                             t.name(), commonProperties.getRequestTimeout());
                 } catch (Exception e) {
-                    log.warn("MCP sync client '{}' initialize() failed: {}", t.name(), e.getMessage());
+                    // The raw message may carry URLs / server text — log the type only.
+                    log.warn("MCP sync client '{}' initialize() failed ({})", t.name(), e.getClass().getSimpleName());
                 }
             }
             clients.add(client);
@@ -188,6 +202,8 @@ public class McpClientConfig {
 
         private final McpConnectionsCache cache;
         private final EnvResolver env;
+        /** When set, only this connection's headers, and only for requests to its own origin. */
+        private final String fixedConnection;
 
         /** Functional interface so tests can inject a fake env. */
         public interface EnvResolver {
@@ -195,8 +211,18 @@ public class McpClientConfig {
         }
 
         public PerConnectionHeaderCustomizer(McpConnectionsCache cache, EnvResolver env) {
+            this(cache, env, null);
+        }
+
+        private PerConnectionHeaderCustomizer(McpConnectionsCache cache, EnvResolver env, String fixedConnection) {
             this.cache = cache;
             this.env = env;
+            this.fixedConnection = fixedConnection;
+        }
+
+        /** Customizer bound to one connection — used for the transports this config builds. */
+        public static PerConnectionHeaderCustomizer forConnection(McpConnectionsCache cache, EnvResolver env, String name) {
+            return new PerConnectionHeaderCustomizer(cache, env, name);
         }
 
         @Override
@@ -206,7 +232,21 @@ public class McpClientConfig {
                               @Nullable String body,
                               McpTransportContext context) {
             if (endpoint == null) return;
-            var connectionName = cache.connectionNameForUri(endpoint.toString());
+            Optional<String> connectionName;
+            if (fixedConnection != null) {
+                // Never send this connection's credentials anywhere but its own origin
+                // (e.g. an SSE 'endpoint' event pointing at another host).
+                boolean ownOrigin = cache.find(fixedConnection)
+                        .map(c -> McpConnectionsCache.matches(origin(c.url()), endpoint.toString()))
+                        .orElse(false);
+                if (!ownOrigin) {
+                    log.warn("MCP connection '{}': request to a different origin — headers not sent", fixedConnection);
+                    return;
+                }
+                connectionName = Optional.of(fixedConnection);
+            } else {
+                connectionName = cache.connectionNameForUri(endpoint.toString());
+            }
             if (connectionName.isEmpty()) return;
             Map<String, String> headers = cache.headersFor(connectionName.get());
             for (var h : headers.entrySet()) {
@@ -214,6 +254,11 @@ public class McpClientConfig {
                 if (value == null || value.isBlank()) continue;
                 builder.header(h.getKey(), value);
             }
+        }
+
+        private static String origin(String url) {
+            URI u = URI.create(url);
+            return u.getScheme() + "://" + u.getRawAuthority();
         }
 
         String resolve(String value) {

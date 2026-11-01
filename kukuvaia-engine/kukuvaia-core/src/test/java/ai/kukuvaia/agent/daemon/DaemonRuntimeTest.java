@@ -46,6 +46,8 @@ class DaemonRuntimeTest {
         final AtomicLong ids = new AtomicLong();
         final Map<Long, String> status = new ConcurrentHashMap<>();
         final Map<Long, String> error = new ConcurrentHashMap<>();
+        /** Stored structured output per task (null values allowed). */
+        final Map<Long, Object> outputs = java.util.Collections.synchronizedMap(new java.util.HashMap<>());
         final List<String> order = java.util.Collections.synchronizedList(new ArrayList<>());
         volatile boolean failOnComplete;
 
@@ -77,6 +79,7 @@ class DaemonRuntimeTest {
         public void markCompleted(long id, ExecutionOutcome outcome, long durationMs) {
             order.add("finalize:" + id);
             if (failOnComplete) throw new IllegalStateException("db down");
+            outputs.put(id, outcome == null ? null : outcome.output());
             status.put(id, "COMPLETED");
         }
 

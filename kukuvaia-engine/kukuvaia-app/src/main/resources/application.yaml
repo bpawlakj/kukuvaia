@@ -13,6 +13,9 @@ kukuvaia:
     # Global tool allowlist for every daemon run, intersected with each specialist's tools.
     # Empty = specialist allowlists only. Example: [read_file, search_content]
     allowed-tools: []
+    # kind: mcp jobs are deny-by-default: list each permitted remote tool as connection/tool.
+    # Example: [sl-aipdlc/sl_status]
+    mcp-allowed-tools: []
     # Kill switch for all daemon work (cron, webhooks, PG NOTIFY, manual runs).
     enabled: ${KUKUVAIA_DAEMON_ENABLED:true}
     # Daemon runs executing at once (all kinds) and admitted runs allowed to wait for a slot.
@@ -23,10 +26,10 @@ kukuvaia:
     project-jobs: ${KUKUVAIA_DAEMON_PROJECT_JOBS:false}
     scheduler-pool-size: 2
     zone: ${KUKUVAIA_DAEMON_ZONE:}
-    # Finished daemon_tasks rows older than this are deleted nightly.
     # After a deadline, wait this long for a cancelled run to stop; a run that ignores cancellation
     # keeps its slot and overlap lock until it really ends.
     cancel-grace-millis: 5000
+    # Finished daemon_tasks rows older than this are deleted nightly.
     retention-days: 30
     retention-cron: "0 30 3 * * *"
     # /api/daemon manual runs and full results are refused while security.dev-mode=true (API auth is

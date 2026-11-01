@@ -111,7 +111,7 @@ class McpClientTransportsTest {
         server = start("/mcp", stub::handle);
         String url = "http://127.0.0.1:" + server.getAddress().getPort();
         var cache = cache(connection("toolkit", url, McpConnection.STREAMABLE_HTTP), connection("legacy", url + "/x", McpConnection.SSE));
-        var transports = McpClientConfig.streamableHttpTransports(cache.all(), new McpClientConfig.PerConnectionHeaderCustomizer(cache, ENV));
+        var transports = McpClientConfig.streamableHttpTransports(cache, ENV);
 
         assertThat(transports).extracting(t -> t.name()).containsExactly("toolkit");
         McpSyncClient client = McpClient.sync(transports.get(0).transport()).requestTimeout(Duration.ofSeconds(5)).build();
@@ -149,17 +149,51 @@ class McpClientTransportsTest {
         });
         String url = "http://127.0.0.1:" + server.getAddress().getPort();
         var cache = cache(connection("legacy", url, McpConnection.SSE));
-        var headers = new McpClientConfig.PerConnectionHeaderCustomizer(cache, ENV);
 
         // without the customizer (what Spring AI's autoconfig builds) the header is missing
         HttpClientSseClientTransport.builder(url).build().connect(m -> m).block(Duration.ofSeconds(5));
         var builder = HttpClientSseClientTransport.builder(url);
-        new McpClientConfig().sseHeaderCustomizer(headers).customize("legacy", builder);
+        McpClientConfig.sseHeaderCustomizer(cache, ENV).customize("legacy", builder);
         builder.build().connect(m -> m).block(Duration.ofSeconds(5));
 
         await().atMost(Duration.ofSeconds(5)).until(() -> seen.size() >= 2);
         assertThat(seen.get(0)).isEqualTo("null");
         assertThat(seen.get(1)).isEqualTo("Bearer t0k");
+    }
+
+    @Test
+    @DisplayName("D5 review #1/#2: URL matching respects origin and path boundaries; shared base URLs are ambiguous")
+    void boundaryMatching() {
+        assertThat(McpConnectionsCache.matches("https://api.x.com", "https://api.x.com/mcp")).isTrue();
+        assertThat(McpConnectionsCache.matches("https://api.x.com", "https://api.x.com.evil.net/mcp")).isFalse();
+        assertThat(McpConnectionsCache.matches("https://api.x.com", "https://api.x.com:8443/mcp")).isFalse();
+        assertThat(McpConnectionsCache.matches("https://api.x.com", "http://api.x.com/mcp")).isFalse();
+        assertThat(McpConnectionsCache.matches("https://h/tenant-a", "https://h/tenant-ab/mcp")).isFalse();
+        assertThat(McpConnectionsCache.matches("https://h/tenant-a", "https://h/tenant-a/mcp")).isTrue();
+        assertThat(McpConnectionsCache.matches("https://api.x.com", "https://api.x.com:443/sse")).isTrue();
+
+        var lookup = cache(connection("api", "https://api.x.com", McpConnection.SSE));
+        assertThat(lookup.connectionNameForUri("https://api.x.com/sse")).contains("api");
+        assertThat(lookup.connectionNameForUri("https://api.x.com.evil.net/sse")).isEmpty();
+        assertThat(lookup.connectionNameForUri("https://api.x.com:8443/sse")).isEmpty();
+
+        var shared = cache(connection("a", "https://h", McpConnection.SSE), connection("b", "https://h/", McpConnection.STREAMABLE_HTTP));
+        assertThat(shared.connectionNameForUri("https://h/mcp")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("D5 review #1/#2: a per-connection customizer sends only its own headers, only to its own origin")
+    void perConnectionCustomizer() {
+        var cache = cache(connection("a", "https://h.example", McpConnection.SSE));
+        var customizer = McpClientConfig.PerConnectionHeaderCustomizer.forConnection(cache, ENV, "a");
+
+        var own = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://h.example/message"));
+        customizer.customize(own, "POST", java.net.URI.create("https://h.example/message"), "{}", null);
+        assertThat(own.build().headers().firstValue("Authorization")).contains("Bearer t0k");
+
+        var foreign = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://h.example.evil.net/message"));
+        customizer.customize(foreign, "POST", java.net.URI.create("https://h.example.evil.net/message"), "{}", null);
+        assertThat(foreign.build().headers().firstValue("Authorization")).isEmpty();
     }
 
     private static HttpServer start(String path, com.sun.net.httpserver.HttpHandler handler) {

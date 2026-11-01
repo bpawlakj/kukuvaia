@@ -34,15 +34,32 @@ public class McpToolExecutor implements DaemonExecutor {
     private static final Logger log = LoggerFactory.getLogger(McpToolExecutor.class);
     static final int MAX_RESULT_CHARS = 64 * 1024;
 
+    static final int MAX_OUTPUT_CHARS = 64 * 1024;
+    private static final int MAX_LISTED = 20;
+
     private final ObjectProvider<McpClientRegistry> registry;
     private final ErrorSanitizer sanitizer;
     private final ObjectProvider<ObjectMapper> objectMapper;
+    private final ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties properties;
 
     public McpToolExecutor(ObjectProvider<McpClientRegistry> registry, ErrorSanitizer sanitizer,
-                           ObjectProvider<ObjectMapper> objectMapper) {
+                           ObjectProvider<ObjectMapper> objectMapper,
+                           ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties properties) {
         this.registry = registry;
         this.sanitizer = sanitizer;
         this.objectMapper = objectMapper;
+        this.properties = properties;
+    }
+
+    private String notAllowed(Target t) {
+        String key = t.connection() + "/" + t.tool();
+        return properties.getMcpAllowedTools().contains(key) ? null
+                : "MCP tool '" + key + "' is not in kukuvaia.daemon.mcp-allowed-tools (kind: mcp is deny-by-default)";
+    }
+
+    private static String listed(java.util.Collection<String> names) {
+        return names.size() <= MAX_LISTED ? names.toString()
+                : names.stream().limit(MAX_LISTED).toList() + " … (+" + (names.size() - MAX_LISTED) + " more)";
     }
 
     @Override
@@ -54,12 +71,14 @@ public class McpToolExecutor implements DaemonExecutor {
     public Optional<String> validate(DaemonJobDefinition definition) {
         Target t = Target.parse(definition.target());
         if (t == null) return Optional.of("mcp target must be {connection, tool}");
+        String denied = notAllowed(t);
+        if (denied != null) return Optional.of(denied);
         McpClientRegistry clients = registry.getIfAvailable();
         if (clients == null) {
             return Optional.of("MCP client is disabled (spring.ai.mcp.client.enabled=false) — kind: mcp unavailable");
         }
         if (clients.find(t.connection()).isEmpty()) {
-            return Optional.of("no MCP connection named '" + t.connection() + "' (available: " + clients.names() + ")");
+            return Optional.of("no MCP connection named '" + t.connection() + "' (available: " + listed(clients.names()) + ")");
         }
         return Optional.empty(); // the tool is checked per run — the server may be down at startup
     }
@@ -68,6 +87,8 @@ public class McpToolExecutor implements DaemonExecutor {
     public ExecutionOutcome execute(JobInvocation invocation, JobLimits limits) {
         Target t = Target.parse(invocation.target());
         if (t == null) throw new IllegalArgumentException("mcp target must be connection/tool");
+        String denied = notAllowed(t);
+        if (denied != null) throw new IllegalStateException(denied);
         McpClientRegistry clients = registry.getIfAvailable();
         if (clients == null) throw new IllegalStateException("MCP client is disabled");
         McpSyncClient client = clients.find(t.connection())
@@ -77,7 +98,7 @@ public class McpToolExecutor implements DaemonExecutor {
         List<String> tools = client.listTools().tools().stream().map(McpSchema.Tool::name).toList();
         if (!tools.contains(t.tool())) {
             throw new IllegalArgumentException("MCP connection '" + t.connection() + "' has no tool '" + t.tool()
-                    + "' (available: " + tools + ")");
+                    + "' (available: " + listed(tools) + ")");
         }
 
         Map<String, Object> arguments = render(invocation.args(), invocation.fields());
@@ -87,11 +108,19 @@ public class McpToolExecutor implements DaemonExecutor {
                     sanitizer.sanitize(text(result)));
             throw new IllegalStateException("MCP tool " + t.connection() + "/" + t.tool() + " returned an error");
         }
-        String text = cap(sanitizer.sanitize(text(result)));
+        // Pre-cap before redaction (bounded work), redact, then cap to the stored size.
+        String raw = text(result);
+        if (raw.length() > 2 * MAX_RESULT_CHARS) raw = raw.substring(0, 2 * MAX_RESULT_CHARS);
+        String text = cap(sanitizer.redact(raw));
         JsonNode output = null;
         if (result.structuredContent() != null && objectMapper.getIfAvailable() != null) {
             try {
-                output = objectMapper.getObject().valueToTree(result.structuredContent());
+                JsonNode tree = objectMapper.getObject().valueToTree(result.structuredContent());
+                if (tree.toString().length() <= MAX_OUTPUT_CHARS) {
+                    output = tree;
+                } else {
+                    log.warn("MCP tool {}/{}: structured output above {} chars not stored", t.connection(), t.tool(), MAX_OUTPUT_CHARS);
+                }
             } catch (RuntimeException e) {
                 log.debug("MCP structured content not convertible: {}", e.getMessage());
             }

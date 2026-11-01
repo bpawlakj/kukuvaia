@@ -102,13 +102,23 @@ public class ErrorSanitizer {
         if (message == null) {
             return "An internal error occurred";
         }
-        String result = message;
-        for (Pattern pattern : SENSITIVE_PATTERNS) {
-            result = pattern.matcher(result).replaceAll("[REDACTED]");
-        }
+        String result = redact(message);
         // Truncate overly long messages (stack traces)
         if (result.length() > 500) {
             result = result.substring(0, 500) + "...[truncated]";
+        }
+        return result;
+    }
+
+    /**
+     * Redact sensitive patterns without truncating — for data (e.g. a daemon MCP tool result) whose
+     * size is bounded by the caller.
+     */
+    public String redact(String text) {
+        if (text == null) return "";
+        String result = text;
+        for (Pattern pattern : SENSITIVE_PATTERNS) {
+            result = pattern.matcher(result).replaceAll("[REDACTED]");
         }
         return result;
     }

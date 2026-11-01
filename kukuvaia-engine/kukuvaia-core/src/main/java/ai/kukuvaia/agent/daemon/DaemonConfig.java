@@ -31,6 +31,12 @@ public class DaemonConfig {
          */
         private List<String> allowedTools = new ArrayList<>();
 
+        /**
+         * {@code kind: mcp} allowlist as {@code connection/tool}. Deny by default: an MCP job is only
+         * loaded and run if its exact target is listed here.
+         */
+        private List<String> mcpAllowedTools = new ArrayList<>();
+
         /** Kill switch: when false no daemon run is admitted and no cron job is scheduled. */
         private boolean enabled = true;
         /** Daemon runs executing at the same time (all kinds together). */
@@ -77,6 +83,11 @@ public class DaemonConfig {
         public void setMaxConcurrent(int maxConcurrent) { this.maxConcurrent = Math.max(1, maxConcurrent); }
         public int getMaxQueued() { return maxQueued; }
         public void setMaxQueued(int maxQueued) { this.maxQueued = Math.max(0, maxQueued); }
+
+        public List<String> getMcpAllowedTools() { return mcpAllowedTools; }
+        public void setMcpAllowedTools(List<String> tools) {
+            this.mcpAllowedTools = tools == null ? new ArrayList<>() : tools;
+        }
 
         public List<String> getAllowedTools() { return allowedTools; }
         public void setAllowedTools(List<String> allowedTools) {

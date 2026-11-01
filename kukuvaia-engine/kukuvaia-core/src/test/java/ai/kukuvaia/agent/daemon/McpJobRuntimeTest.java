@@ -57,8 +57,12 @@ class McpJobRuntimeTest {
         var beans = new StaticListableBeanFactory();
         beans.addBean("registry", new McpClientRegistry(Map.of("toolkit", client)));
         beans.addBean("mapper", JSON);
+        var properties = new DaemonProperties();
+        properties.setCancelGraceMillis(500);
+        properties.setMcpAllowedTools(List.of("toolkit/echo", "toolkit/slow", "toolkit/fail", "toolkit/nosuch", "toolkit/big",
+                "ghost/echo"));
         var executor = new McpToolExecutor(beans.getBeanProvider(McpClientRegistry.class), new ErrorSanitizer(),
-                beans.getBeanProvider(ObjectMapper.class));
+                beans.getBeanProvider(ObjectMapper.class), properties);
         registry = new DaemonJobRegistry(List.of(executor), List.of(
                 Map.entry("echo.yaml", """
                         name: toolkit-echo
@@ -71,9 +75,9 @@ class McpJobRuntimeTest {
                 Map.entry("slow.yaml", "name: toolkit-slow\nkind: mcp\ntarget: { connection: toolkit, tool: slow }\nlimits: { timeout: 1s }\n"),
                 Map.entry("fail.yaml", "name: toolkit-fail\nkind: mcp\ntarget: { connection: toolkit, tool: fail }\n"),
                 Map.entry("nosuch.yaml", "name: toolkit-nosuch\nkind: mcp\ntarget: { connection: toolkit, tool: nosuch }\n"),
+                Map.entry("big.yaml", "name: toolkit-big\nkind: mcp\ntarget: { connection: toolkit, tool: big }\n"),
+                Map.entry("denied.yaml", "name: toolkit-denied\nkind: mcp\ntarget: { connection: toolkit, tool: delete_everything }\n"),
                 Map.entry("ghost.yaml", "name: ghost-job\nkind: mcp\ntarget: { connection: ghost, tool: echo }\n")));
-        var properties = new DaemonProperties();
-        properties.setCancelGraceMillis(500);
         runtime = new DaemonRuntime(List.of(executor), DaemonRuntimeTest.budget(100_000, new AtomicInteger(), store.order),
                 new DaemonScheduleGuard(), store, properties, new ErrorSanitizer(), new SimpleMeterRegistry());
     }
@@ -126,6 +130,25 @@ class McpJobRuntimeTest {
     }
 
     @Test
+    @DisplayName("D5 review #3: kind: mcp is deny-by-default — a tool outside mcp-allowed-tools is rejected at load")
+    void allowlist() {
+        assertThat(registry.find("toolkit-denied")).isEmpty();
+        assertThat(String.join("\n", registry.rejected())).contains("'toolkit/delete_everything' is not in kukuvaia.daemon.mcp-allowed-tools");
+    }
+
+    @Test
+    @DisplayName("D5 review #7: oversized structured output is not stored; text is capped")
+    void oversizedOutput() {
+        DaemonTaskResult r = run("toolkit-big", Map.of());
+
+        assertThat(r.status()).isEqualTo(DaemonTaskStatus.COMPLETED);
+        assertThat(r.result().length()).isLessThan(70 * 1024);
+        assertThat(r.result()).endsWith("(truncated)");
+        assertThat(store.outputs).containsKey(r.taskId());
+        assertThat(store.outputs.get(r.taskId())).isNull();
+    }
+
+    @Test
     @DisplayName("unknown connection → job rejected at load with a clear error")
     void unknownConnection() {
         assertThat(registry.find("ghost-job")).isEmpty();
@@ -153,7 +176,7 @@ class McpJobRuntimeTest {
                 yield Map.of("protocolVersion", req.path("params").path("protocolVersion").asString(),
                         "capabilities", Map.of("tools", Map.of()), "serverInfo", Map.of("name", "stub", "version", "1"));
             }
-            case "tools/list" -> Map.of("tools", List.of(tool("echo"), tool("slow"), tool("fail")));
+            case "tools/list" -> Map.of("tools", List.of(tool("echo"), tool("slow"), tool("fail"), tool("big")));
             case "tools/call" -> call(req.path("params"));
             default -> Map.of();
         };
@@ -175,6 +198,8 @@ class McpJobRuntimeTest {
                 received.set(params.path("arguments"));
                 yield Map.of("content", List.of(Map.of("type", "text", "text", "echo: " + params.path("arguments").path("q").asString())));
             }
+            case "big" -> Map.of("content", List.of(Map.of("type", "text", "text", "x".repeat(300_000))),
+                    "structuredContent", Map.of("blob", "y".repeat(200_000)));
             case "slow" -> {
                 try { Thread.sleep(5000); } catch (InterruptedException ignored) { }
                 yield Map.of("content", List.of(Map.of("type", "text", "text", "late")));

@@ -46,14 +46,18 @@ public class McpConnectionsController {
         this.cache = cache;
     }
 
+    private static final java.util.regex.Pattern CREDENTIAL_HEADER =
+            java.util.regex.Pattern.compile("(?i).*(authorization|token|secret|key|cookie|password|credential).*");
+
     @GetMapping
     public List<McpConnection> list() {
-        return repository.findAll();
+        return repository.findAll().stream().map(McpConnectionsController::masked).toList();
     }
 
     @GetMapping("/{id}")
     public ResponseEntity<McpConnection> get(@PathVariable UUID id) {
         return repository.findById(id)
+                .map(McpConnectionsController::masked)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
@@ -66,7 +70,8 @@ public class McpConnectionsController {
         if (req.url() == null || req.url().isBlank()) {
             return ResponseEntity.badRequest().build();
         }
-        if (!validTransport(req.transport(), req.endpoint())) {
+        if (!validTransport(req.transport(), req.endpoint()) || !validUrl(req.url())
+                || !validHeaders(req.headers()) || !validPath(req.sseEndpoint())) {
             return ResponseEntity.badRequest().build();
         }
         if (repository.findByName(req.name()).isPresent()) {
@@ -83,13 +88,14 @@ public class McpConnectionsController {
                 req.endpoint());
         cache.refresh();
         return repository.findById(id)
-                .map(c -> ResponseEntity.status(201).body(c))
+                .map(c -> ResponseEntity.status(201).body(masked(c)))
                 .orElse(ResponseEntity.internalServerError().build());
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<McpConnection> update(@PathVariable UUID id, @RequestBody UpdateRequest req) {
-        if (!validTransport(req.transport(), req.endpoint())) {
+        if (!validTransport(req.transport(), req.endpoint()) || (req.url() != null && !validUrl(req.url()))
+                || !validHeaders(req.headers()) || !validPath(req.sseEndpoint())) {
             return ResponseEntity.badRequest().build();
         }
         int affected = repository.update(id, req.url(), req.sseEndpoint(), req.headers(), req.enabled(),
@@ -99,6 +105,7 @@ public class McpConnectionsController {
         }
         cache.refresh();
         return repository.findById(id)
+                .map(McpConnectionsController::masked)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.internalServerError().build());
     }
@@ -118,6 +125,42 @@ public class McpConnectionsController {
     public ResponseEntity<Map<String, Object>> refresh() {
         cache.refresh();
         return ResponseEntity.ok(Map.of("refreshed", true, "enabledCount", cache.all().size()));
+    }
+
+    /** Literal header values are never echoed back — only {@code env:} references are shown. */
+    static McpConnection masked(McpConnection c) {
+        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        c.headers().forEach((k, v) -> headers.put(k, v != null && v.startsWith("env:") ? v : "***"));
+        return new McpConnection(c.id(), c.name(), c.url(), c.sseEndpoint(), headers, c.enabled(), c.description(),
+                c.createdAt(), c.updatedAt(), c.transport(), c.endpoint());
+    }
+
+    /** http(s) only, and never a link-local address (cloud metadata endpoints such as 169.254.169.254). */
+    static boolean validUrl(String url) {
+        try {
+            java.net.URI uri = java.net.URI.create(url.trim());
+            String scheme = uri.getScheme();
+            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https")) || uri.getHost() == null) {
+                return false;
+            }
+            for (java.net.InetAddress address : java.net.InetAddress.getAllByName(uri.getHost())) {
+                if (address.isLinkLocalAddress() || address.isAnyLocalAddress()) return false;
+            }
+            return true;
+        } catch (IllegalArgumentException | java.net.UnknownHostException e) {
+            return false;
+        }
+    }
+
+    /** Credential-like headers must reference the environment ({@code env:VAR}) — no secrets in the DB. */
+    static boolean validHeaders(Map<String, String> headers) {
+        if (headers == null) return true;
+        return headers.entrySet().stream().allMatch(h -> h.getKey() != null
+                && (!CREDENTIAL_HEADER.matcher(h.getKey()).matches() || (h.getValue() != null && h.getValue().startsWith("env:"))));
+    }
+
+    private static boolean validPath(String path) {
+        return path == null || (path.startsWith("/") && path.length() <= 100);
     }
 
     /** {@code null} = keep / default; otherwise {@code sse | streamable-http}, endpoint a path. */
