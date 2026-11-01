@@ -42,7 +42,7 @@ import static org.mockito.Mockito.when;
 class DaemonRuntimeTest {
 
     /** In-memory audit table. */
-    static final class FakeStore extends DaemonTaskStore {
+    static class FakeStore extends DaemonTaskStore {
         final AtomicLong ids = new AtomicLong();
         final Map<Long, String> status = new ConcurrentHashMap<>();
         final Map<Long, String> error = new ConcurrentHashMap<>();
@@ -162,18 +162,18 @@ class DaemonRuntimeTest {
     }
 
     @Test
-    @DisplayName("no reported usage → charged max_tokens (fail closed)")
+    @DisplayName("no reported usage → charged the run's token_budget (fail closed)")
     void noUsage_chargesMaxTokens() {
         runtime(100_000, executor(JobKind.SPECIALIST, inv -> new ExecutionOutcome("x", null, 0, 0, false, null, null)));
 
         DaemonTaskResult r = runtime.runSync(job("j", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "manual"));
 
-        assertThat(r.tokenUsage()).isEqualTo(1000);
-        assertThat(ledger.get()).isEqualTo(1000);
+        assertThat(r.tokenUsage()).isEqualTo(5000);
+        assertThat(ledger.get()).isEqualTo(5000);
     }
 
     @Test
-    @DisplayName("deadline exceeded → TIMEOUT, the run is interrupted, max_tokens charged")
+    @DisplayName("deadline exceeded → TIMEOUT, the run is interrupted, token_budget charged")
     void deadline_timeoutCancelsAndCharges() throws Exception {
         CountDownLatch interrupted = new CountDownLatch(1);
         runtime(100_000, executor(JobKind.SPECIALIST, inv -> {
@@ -190,7 +190,7 @@ class DaemonRuntimeTest {
 
         assertThat(r.status()).isEqualTo(DaemonTaskStatus.TIMEOUT);
         assertThat(interrupted.await(5, TimeUnit.SECONDS)).isTrue();
-        assertThat(ledger.get()).isEqualTo(1000);
+        assertThat(ledger.get()).isEqualTo(5000);
         assertThat(store.status.get(r.taskId())).isEqualTo("TIMEOUT");
     }
 
@@ -205,11 +205,11 @@ class DaemonRuntimeTest {
 
         DaemonTaskResult midRun = runtime.runSync(job("midrun", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
         assertThat(midRun.status()).isEqualTo(DaemonTaskStatus.FAILED);
-        assertThat(ledger.get()).isEqualTo(1000);
+        assertThat(ledger.get()).isEqualTo(5000);
 
         runtime.runSync(job("preflight", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
         runtime.runSync(job("unknown", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
-        assertThat(ledger.get()).as("pre-flight failures cost nothing").isEqualTo(1000);
+        assertThat(ledger.get()).as("pre-flight failures cost nothing").isEqualTo(5000);
     }
 
     @Test
@@ -243,7 +243,7 @@ class DaemonRuntimeTest {
     void budgetReservation_preventsOvershoot() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
         properties.setMaxConcurrent(5);
-        runtime(2500, executor(JobKind.SPECIALIST, inv -> {
+        runtime(12_000, executor(JobKind.SPECIALIST, inv -> {
             try {
                 release.await(5, TimeUnit.SECONDS);
             } catch (InterruptedException ignored) {
@@ -268,7 +268,7 @@ class DaemonRuntimeTest {
     @DisplayName("budget exhausted → SKIPPED, executor never called; Java jobs are not budget-gated")
     void budgetExhausted_skipsTokenKindsOnly() {
         AtomicInteger calls = new AtomicInteger();
-        runtime(500, executor(JobKind.SPECIALIST, inv -> { calls.incrementAndGet(); return ExecutionOutcome.ofText("x"); }),
+        runtime(4000, executor(JobKind.SPECIALIST, inv -> { calls.incrementAndGet(); return ExecutionOutcome.ofText("x"); }),
                 executor(JobKind.JAVA, inv -> ExecutionOutcome.ofText("java ok")));
 
         DaemonTaskResult llm = runtime.runSync(job("llm", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
@@ -384,5 +384,88 @@ class DaemonRuntimeTest {
 
         assertThat(r.status()).isEqualTo(DaemonTaskStatus.SKIPPED);
         assertThat(r.error()).contains("a2a");
+    }
+
+    @Test
+    @DisplayName("review #1: reservation is the run's token_budget, not the per-response max_tokens")
+    void reservationUsesTokenBudget() {
+        AtomicInteger calls = new AtomicInteger();
+        runtime(4999, executor(JobKind.SPECIALIST, inv -> { calls.incrementAndGet(); return ExecutionOutcome.ofText("x"); }));
+
+        // max_tokens (1000) fits the budget, token_budget (5000) does not → refused before running
+        DaemonTaskResult r = runtime.runSync(job("big", JobKind.SPECIALIST, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
+
+        assertThat(r.status()).isEqualTo(DaemonTaskStatus.SKIPPED);
+        assertThat(calls).hasValue(0);
+    }
+
+    @Test
+    @DisplayName("review #2: a failing budget reservation does not leak the overlap lock")
+    void reservationFailure_releasesOverlap() {
+        DaemonBudgetGuard flaky = mock(DaemonBudgetGuard.class);
+        when(flaky.tryReserve(org.mockito.ArgumentMatchers.anyInt()))
+                .thenThrow(new IllegalStateException("db blip"))
+                .thenReturn(true);
+        runtime = new DaemonRuntime(List.of(executor(JobKind.SPECIALIST, inv -> ExecutionOutcome.ofText("ok"))), flaky,
+                new DaemonScheduleGuard(), store, properties, new ErrorSanitizer(), new SimpleMeterRegistry());
+        var j = job("skip-job", JobKind.SPECIALIST, LIMITS, Overlap.skip());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> runtime.runSync(j, JobRequest.of("p", "m")))
+                .hasMessageContaining("db blip");
+        assertThat(runtime.runSync(j, JobRequest.of("p", "m")).status())
+                .as("overlap lock must not be held by the failed admission").isEqualTo(DaemonTaskStatus.COMPLETED);
+    }
+
+    @Test
+    @DisplayName("review #3: a run that ignores interruption keeps its slot and overlap lock until it really ends")
+    void zombieRun_holdsSlotAndOverlap() throws Exception {
+        properties.setMaxConcurrent(2);
+        properties.setCancelGraceMillis(100);
+        var stop = new java.util.concurrent.atomic.AtomicBoolean();
+        runtime(100_000, executor(JobKind.JAVA, inv -> {
+            while (!stop.get()) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException ignored) {
+                    // deliberately ignores cancellation
+                }
+            }
+            return ExecutionOutcome.ofText("finally");
+        }));
+        var j = job("stubborn", JobKind.JAVA, LIMITS.withTimeout(Duration.ofMillis(200)), Overlap.skip());
+
+        DaemonTaskResult r = runtime.runSync(j, JobRequest.of(null, "cron"));
+
+        assertThat(r.status()).isEqualTo(DaemonTaskStatus.TIMEOUT);
+        assertThat(runtime.zombieRuns()).isEqualTo(1);
+        assertThat(runtime.freeSlots()).as("zombie still occupies a slot").isEqualTo(1);
+        assertThat(runtime.submit(j, JobRequest.of(null, "cron")).status())
+                .as("overlap: skip still blocks while the zombie runs").isEqualTo(DaemonTaskStatus.SKIPPED);
+
+        stop.set(true);
+        await().atMost(Duration.ofSeconds(5)).until(() -> runtime.freeSlots() == 2 && runtime.zombieRuns() == 0);
+        assertThat(runtime.submit(j, JobRequest.of(null, "cron")).accepted()).isTrue();
+    }
+
+    @Test
+    @DisplayName("review #6: restart recovery cancels rows of a previous process only")
+    void restartRecovery() {
+        var seen = new java.util.concurrent.atomic.AtomicReference<java.time.Instant>();
+        FakeStore recording = new FakeStore() {
+            @Override
+            public int cancelInterrupted(java.time.Instant processStart, int llmCharge) {
+                seen.set(processStart);
+                return 2;
+            }
+        };
+        var rt = new DaemonRuntime(List.of(executor(JobKind.JAVA, inv -> ExecutionOutcome.ofText("x"))),
+                budget(100_000, ledger, recording.order), new DaemonScheduleGuard(), recording, properties,
+                new ErrorSanitizer(), new SimpleMeterRegistry());
+        try {
+            rt.recoverInterruptedRuns();
+            assertThat(seen.get()).isNotNull().isBeforeOrEqualTo(java.time.Instant.now());
+        } finally {
+            rt.shutdown();
+        }
     }
 }

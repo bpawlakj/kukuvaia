@@ -50,6 +50,12 @@ public class DaemonConfig {
         /** Allow manual runs and full task results over the API while kukuvaia.security.dev-mode=true. */
         private boolean apiAllowInDevMode = false;
 
+        /** After a deadline, how long to wait for a cancelled run to stop before treating it as stuck. */
+        private long cancelGraceMillis = 5000;
+
+        public long getCancelGraceMillis() { return cancelGraceMillis; }
+        public void setCancelGraceMillis(long millis) { this.cancelGraceMillis = Math.max(0, millis); }
+
         public int getRetentionDays() { return retentionDays; }
         public void setRetentionDays(int days) { this.retentionDays = Math.max(1, days); }
         public boolean isApiAllowInDevMode() { return apiAllowInDevMode; }

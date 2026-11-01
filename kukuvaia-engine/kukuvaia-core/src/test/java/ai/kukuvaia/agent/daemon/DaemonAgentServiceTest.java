@@ -66,20 +66,21 @@ class DaemonAgentServiceTest {
     void specialistExecutor_passesDaemonScope() {
         SubAgentFactory factory = mock(SubAgentFactory.class);
         when(factory.executeForResult(any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyInt(), any(),
-                org.mockito.ArgumentMatchers.anyInt())).thenReturn(new SubAgentResult("ok", 3, 4, true));
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenReturn(new SubAgentResult("ok", 3, 4, true));
         DaemonProperties props = new DaemonProperties();
         var executor = new SpecialistExecutor(factory, props);
         var invocation = new JobInvocation(1, "j", "analyst", "prompt", Map.of(), null, Instant.now());
         var limits = new JobLimits(Duration.ofSeconds(10), 100, 2, 10, 1000);
 
         var outcome = executor.execute(invocation, limits);
-        verify(factory).executeForResult("prompt", "analyst", ExecutionContext.DAEMON, null, 0, null, 2);
+        verify(factory).executeForResult("prompt", "analyst", ExecutionContext.DAEMON, null, 0, null, 2, 100);
         assertThat(outcome.totalTokens()).isEqualTo(7);
         assertThat(outcome.usageReported()).isTrue();
 
         props.setAllowedTools(List.of("read_file"));
         executor.execute(invocation, limits);
-        verify(factory).executeForResult("prompt", "analyst", ExecutionContext.DAEMON, null, 0, List.of("read_file"), 2);
+        verify(factory).executeForResult("prompt", "analyst", ExecutionContext.DAEMON, null, 0, List.of("read_file"), 2, 100);
     }
 
     @Test

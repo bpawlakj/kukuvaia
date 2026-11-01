@@ -108,7 +108,10 @@ public class JavaJobExecutor implements DaemonExecutor {
             if (isCancelled()) {
                 throw new IllegalStateException("Daemon job '" + jobName() + "' is cancelled — specialist not called");
             }
-            int reserve = subAgentFactory.spec(specialist).map(SubAgentSpec::maxTokens).filter(t -> t > 0).orElse(4096);
+            // Usage is cumulative over all tool rounds, so reserve max_tokens × (max_tool_rounds + 1).
+            int reserve = subAgentFactory.spec(specialist)
+                    .map(s -> Math.max(1, s.maxTokens()) * (Math.max(0, s.maxToolRounds()) + 1))
+                    .orElse(JobLimits.defaults().tokenBudget());
             if (!budget.tryReserve(reserve)) {
                 throw new IllegalStateException("Daily daemon token budget does not allow calling '" + specialist + "'");
             }

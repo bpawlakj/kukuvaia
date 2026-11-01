@@ -151,4 +151,19 @@ class LlmProviderServiceDaemonPolicyTest {
                 .isInstanceOf(LlmProviderService.DaemonProviderPolicyException.class);
         assertThat(service.resolve("supervisor", ExecutionContext.INTERACTIVE)).isSameAs(copilotModel);
     }
+
+    @Test
+    @DisplayName("D2 review #4: under DAEMON legacy providers (no metadata) are refused unless the name is the Copilot opt-in")
+    void daemon_legacyProviders() {
+        service.register("default", copilotModel);
+        service.register("copilot", copilotModel);
+
+        assertThatThrownBy(() -> service.resolve("default", ExecutionContext.DAEMON))
+                .isInstanceOf(LlmProviderService.DaemonProviderPolicyException.class);
+        assertThat(service.resolve("copilot", ExecutionContext.DAEMON)).isSameAs(copilotModel);
+        assertThatThrownBy(() -> service.resolve(null, ExecutionContext.DAEMON))
+                .as("legacy default is never the implicit daemon fallback")
+                .isInstanceOf(LlmProviderService.DaemonProviderPolicyException.class);
+        assertThat(service.resolve("default", ExecutionContext.INTERACTIVE)).isSameAs(copilotModel);
+    }
 }

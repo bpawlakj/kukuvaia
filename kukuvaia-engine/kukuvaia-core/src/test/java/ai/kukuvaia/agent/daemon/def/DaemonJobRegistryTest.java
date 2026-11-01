@@ -98,4 +98,29 @@ class DaemonJobRegistryTest {
         assertThat(DaemonJobRegistry.loadSources(Optional.of(root)))
                 .anyMatch(e -> e.getKey().equals(".kukuvaia/daemon/p.yaml"));
     }
+
+    @Test
+    @DisplayName("review #8: a replacement that fails validation leaves the existing job active")
+    void rejectedReplacementKeepsOriginal() {
+        var registry = new DaemonJobRegistry(executors, List.of(
+                Map.entry("classpath:daemon/ci.yaml", "name: ci-job\nkind: java\ntarget: scan\ntriggers: [ { webhook: ci } ]\n"),
+                Map.entry("classpath:daemon/other.yaml", "name: other\nkind: java\ntarget: scan\ntriggers: [ { webhook: other } ]\n"),
+                // project replacement of ci-job that steals another job's route → rejected
+                Map.entry(".kukuvaia/daemon/ci.yaml", "name: ci-job\nkind: java\ntarget: scan\ntriggers: [ { webhook: other } ]\n")));
+
+        assertThat(registry.find("ci-job")).map(DaemonJobDefinition::source).contains("classpath:daemon/ci.yaml");
+        assertThat(registry.byWebhookRoute("ci")).map(DaemonJobDefinition::name).contains("ci-job");
+        assertThat(registry.rejected()).singleElement().asString().contains("already used by job 'other'");
+    }
+
+    @Test
+    @DisplayName("a same-name replacement may keep its own webhook route")
+    void replacementMayReuseOwnRoute() {
+        var registry = new DaemonJobRegistry(executors, List.of(
+                Map.entry("a.yaml", "name: ci-job\nkind: java\ntarget: scan\ntriggers: [ { webhook: ci } ]\ndescription: a\n"),
+                Map.entry("b.yaml", "name: ci-job\nkind: java\ntarget: scan\ntriggers: [ { webhook: ci } ]\ndescription: b\n")));
+
+        assertThat(registry.rejected()).isEmpty();
+        assertThat(registry.byWebhookRoute("ci")).map(DaemonJobDefinition::description).contains("b");
+    }
 }

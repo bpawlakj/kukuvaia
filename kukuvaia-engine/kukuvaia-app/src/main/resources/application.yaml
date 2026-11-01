@@ -24,6 +24,9 @@ kukuvaia:
     scheduler-pool-size: 2
     zone: ${KUKUVAIA_DAEMON_ZONE:}
     # Finished daemon_tasks rows older than this are deleted nightly.
+    # After a deadline, wait this long for a cancelled run to stop; a run that ignores cancellation
+    # keeps its slot and overlap lock until it really ends.
+    cancel-grace-millis: 5000
     retention-days: 30
     retention-cron: "0 30 3 * * *"
     # /api/daemon manual runs and full results are refused while security.dev-mode=true (API auth is

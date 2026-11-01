@@ -22,5 +22,8 @@ triggers:
 limits:
   timeout: 125s
   max_tokens: 4096
+  max_tool_rounds: 6
+  # Cumulative prompt + completion over all rounds; reserved against the daily budget at admission.
+  token_budget: 30000
 overlap: skip
 notify: [log]

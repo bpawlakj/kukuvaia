@@ -56,7 +56,7 @@ class DaemonTaskMigrationTest {
         ReflectionTestUtils.setField(budget, "alertThreshold", 0.8);
         var specialists = mock(SubAgentFactory.class);
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull(), anyInt()))
+                eq(0), isNull(), anyInt(), anyInt()))
                 .thenReturn(new SubAgentResult("Build failure analyzed", 100, 23, true));
         var properties = new DaemonProperties();
         var runtime = new DaemonRuntime(List.of(new SpecialistExecutor(specialists, properties)), budget,
@@ -99,7 +99,7 @@ class DaemonTaskMigrationTest {
         assertThat(budget.getRemainingBudget()).isEqualTo(99_877);
 
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull(), anyInt()))
+                eq(0), isNull(), anyInt(), anyInt()))
                 .thenThrow(new IllegalStateException("Synthetic specialist failure"));
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
@@ -147,6 +147,16 @@ class DaemonTaskMigrationTest {
         assertThat(new DaemonTaskStore(jdbc).pruneOlderThan(30)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM kukuvaia_agent.daemon_tasks WHERE name = 'old-running'",
                 Integer.class)).isEqualTo(1);
+        // Restart recovery: rows of a previous process are cancelled, interrupted LLM runs charged.
+        jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status, created_at) "
+                + "VALUES ('stale-llm', 'specialist', 'analyst', 'cron', 'RUNNING', now() - interval '1 hour'), "
+                + "('stale-q', 'java', 't', 'cron', 'QUEUED', now() - interval '1 hour')");
+        // 3 = the two rows above + 'old-running' kept by the retention check (also from a previous process).
+        assertThat(new DaemonTaskStore(jdbc).cancelInterrupted(java.time.Instant.now().minusSeconds(60), 20_000)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT token_usage FROM kukuvaia_agent.daemon_tasks WHERE name = 'stale-llm'",
+                Integer.class)).isEqualTo(20_000);
+        assertThat(jdbc.queryForObject("SELECT status || '|' || error FROM kukuvaia_agent.daemon_tasks WHERE name = 'stale-q'",
+                String.class)).isEqualTo("CANCELLED|interrupted by restart (was QUEUED)");
         // New lifecycle states are accepted; unknown ones are not.
         jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
                 + "VALUES ('scan', 'java', 'astralScan', 'cron', 'QUEUED')");

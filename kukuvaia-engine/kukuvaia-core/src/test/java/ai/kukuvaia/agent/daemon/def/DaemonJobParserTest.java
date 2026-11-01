@@ -126,4 +126,14 @@ class DaemonJobParserTest {
         assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\ninput: { fields: [a], match: { a: [] } }\n"))
                 .hasMessageContaining("at least one value");
     }
+
+    @Test
+    @DisplayName("provider is validated; integers beyond int range are rejected (no silent wrap to 'unset')")
+    void providerAndIntegerRange() {
+        assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\nprovider: 'https://evil'\n"))
+                .hasMessageContaining("provider must match");
+        assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\nlimits: { max_tokens: 4294967296 }\n"))
+                .hasMessageContaining("non-negative integer");
+        assertThat(parse("name: x1\nkind: java\ntarget: t\nprovider: smartgate\n").provider()).isEqualTo("smartgate");
+    }
 }

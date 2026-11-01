@@ -56,6 +56,8 @@ public class DaemonAgentService {
 
     static JobLimits fromSpec(SubAgentSpec spec) {
         Duration specTimeout = Duration.ofSeconds(spec.timeoutSeconds() > 0 ? spec.timeoutSeconds() : 300);
-        return new JobLimits(specTimeout.plus(DEADLINE_MARGIN), spec.maxTokens(), spec.maxToolRounds(), 20, 20_000);
+        // Usage is cumulative over all tool rounds: budget max_tokens × (max_tool_rounds + 1).
+        int tokenBudget = Math.max(1, spec.maxTokens()) * (Math.max(0, spec.maxToolRounds()) + 1);
+        return new JobLimits(specTimeout.plus(DEADLINE_MARGIN), spec.maxTokens(), spec.maxToolRounds(), 20, tokenBudget);
     }
 }

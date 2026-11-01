@@ -111,6 +111,20 @@ public class DaemonTaskStore {
         return jdbc.query("SELECT " + COLUMNS + " FROM " + TABLE + " WHERE id = ?", ROW, id).stream().findFirst();
     }
 
+    /**
+     * Mark QUEUED/RUNNING rows created before {@code processStart} (a previous process) as CANCELLED.
+     * Interrupted RUNNING LLM rows are charged at least {@code llmCharge} tokens.
+     */
+    public int cancelInterrupted(Instant processStart, int llmCharge) {
+        return jdbc.update("UPDATE " + TABLE + " SET "
+                        + "token_usage = CASE WHEN status = 'RUNNING' AND kind IN ('specialist', 'embabel') "
+                        + "THEN GREATEST(token_usage, ?) ELSE token_usage END, "
+                        + "error = 'interrupted by restart (was ' || status || ')', "
+                        + "status = 'CANCELLED', completed_at = now() "
+                        + "WHERE status IN ('QUEUED', 'RUNNING') AND created_at < ?",
+                llmCharge, Timestamp.from(processStart));
+    }
+
     /** Delete finished runs older than {@code retentionDays} (security-review #21). */
     public int pruneOlderThan(int retentionDays) {
         return jdbc.update("DELETE FROM " + TABLE + " WHERE created_at < now() - make_interval(days => ?) "

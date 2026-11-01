@@ -96,6 +96,12 @@ public class LlmProviderService {
             // 2. Try as legacy registered provider
             ChatModel legacy = legacyProviders.get(explicitProvider);
             if (legacy != null) {
+                if (context == ExecutionContext.DAEMON && !isCopilotName(explicitProvider)) {
+                    // Legacy providers carry no metadata — under DAEMON only an explicit Copilot opt-in
+                    // may pick one; anything else cannot be verified and is refused (fail closed).
+                    throw new DaemonProviderPolicyException("legacy provider '" + explicitProvider + "'",
+                            "it has no provider metadata, so the daemon policy cannot verify it");
+                }
                 log.debug("Resolved '{}' as legacy provider for context {}", explicitProvider, context);
                 return legacy;
             }
@@ -211,11 +217,11 @@ public class LlmProviderService {
             log.info("No '{}' role configured — daemon work uses the supervisor role", daemonDefaultRole);
             return supervisor;
         }
-        // Legacy providers carry no provider metadata, so they cannot be policy-checked. No production
-        // code registers them today (register() has no callers outside tests); kept for back-compat.
-        ChatModel legacyDefault = legacyDefault();
-        if (legacyDefault != null) {
-            return legacyDefault;
+        // Legacy providers carry no provider metadata, so they cannot be policy-checked: never use
+        // one as the implicit daemon fallback (fail closed).
+        if (legacyDefault() != null) {
+            throw new DaemonProviderPolicyException("legacy default provider",
+                    "it has no provider metadata, so the daemon policy cannot verify it");
         }
         throw new ProviderNotAvailableException(daemonDefaultRole);
     }

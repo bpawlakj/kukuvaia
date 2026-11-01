@@ -74,16 +74,18 @@ public class DaemonJobRegistry {
                 errors.add(def.source() + ": " + problem.get());
                 continue;
             }
-            DaemonJobDefinition previous = loaded.remove(def.name());
-            if (previous != null) {
-                log.info("Daemon job '{}' from {} replaces the one from {}", def.name(), def.source(), previous.source());
-                routes.values().removeIf(d -> d.name().equals(def.name()));
-            }
+            // Validate completely before touching the job this one would replace — a rejected
+            // replacement must leave the existing (e.g. built-in) job active.
             String clash = webhookClash(def, routes);
             if (clash != null) {
                 errors.add(def.source() + ": webhook route '" + clash + "' is already used by job '"
                         + routes.get(clash).name() + "'");
                 continue;
+            }
+            DaemonJobDefinition previous = loaded.remove(def.name());
+            if (previous != null) {
+                log.info("Daemon job '{}' from {} replaces the one from {}", def.name(), def.source(), previous.source());
+                routes.values().removeIf(d -> d.name().equals(def.name()));
             }
             loaded.put(def.name(), def);
             for (DaemonTrigger t : def.triggers()) {
@@ -125,9 +127,13 @@ public class DaemonJobRegistry {
         return rejected;
     }
 
+    /** A route already used by a <em>different</em> job (a same-name replacement may reuse its routes). */
     private static String webhookClash(DaemonJobDefinition def, Map<String, DaemonJobDefinition> routes) {
         for (DaemonTrigger t : def.triggers()) {
-            if (t instanceof DaemonTrigger.Webhook w && routes.containsKey(w.route())) return w.route();
+            if (t instanceof DaemonTrigger.Webhook w && routes.containsKey(w.route())
+                    && !routes.get(w.route()).name().equals(def.name())) {
+                return w.route();
+            }
         }
         return null;
     }

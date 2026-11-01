@@ -45,6 +45,7 @@ public final class DaemonJobParser {
     private static final Pattern CHANNEL = Pattern.compile("[a-z_][a-z0-9_]{0,62}");
     private static final Pattern FIELD = Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,63}");
     private static final Pattern SINK = Pattern.compile("[a-z][a-z0-9-]{0,31}");
+    private static final Pattern PROVIDER = Pattern.compile("[a-z0-9][a-z0-9_-]{0,39}");
 
     private static final YAMLMapper YAML = YAMLMapper.builder().build();
 
@@ -89,6 +90,9 @@ public final class DaemonJobParser {
         }
         List<DaemonTrigger> triggers = parseTriggers(source, doc.get("triggers"));
         String provider = optionalString(source, doc, "provider");
+        if (provider != null && !PROVIDER.matcher(provider).matches()) {
+            fail(source, "provider must match " + PROVIDER.pattern());
+        }
         JobLimits limits = parseLimits(source, doc.get("limits"));
         Overlap overlap = parseOverlap(source, doc.get("overlap"));
         List<String> notify = parseStringList(source, doc.get("notify"), "notify", SINK);
@@ -247,8 +251,9 @@ public final class DaemonJobParser {
     private static int nonNegative(String source, Map<?, ?> map, String key) {
         Object v = map.get(key);
         if (v == null) return 0;
-        if (!(v instanceof Number n) || n.intValue() < 0 || n.doubleValue() != Math.floor(n.doubleValue())) {
-            fail(source, key + " must be a non-negative integer");
+        if (!(v instanceof Number n) || n.doubleValue() < 0 || n.doubleValue() > Integer.MAX_VALUE
+                || n.doubleValue() != Math.floor(n.doubleValue())) {
+            fail(source, key + " must be a non-negative integer (max " + Integer.MAX_VALUE + ")");
             return 0;
         }
         return n.intValue();

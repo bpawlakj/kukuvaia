@@ -8,6 +8,7 @@ import ai.kukuvaia.agent.daemon.exec.DaemonExecutor;
 import ai.kukuvaia.agent.daemon.exec.ExecutionOutcome;
 import ai.kukuvaia.agent.daemon.exec.JobInvocation;
 import ai.kukuvaia.agent.daemon.exec.JobKind;
+import ai.kukuvaia.agent.daemon.exec.JobLimits;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.subagent.SubAgentGuard;
 import ai.kukuvaia.provider.service.LlmProviderService;
@@ -26,6 +27,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,7 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </pre>
  *
  * <p>Token accounting fails closed: a run that reported no usage, timed out, was cancelled, or failed
- * after its call started is charged the job's {@code maxTokens}. Only pre-flight failures (unknown
+ * after its call started is charged the job's {@code token_budget}. Only pre-flight failures (unknown
  * specialist, provider policy, provider not configured, depth guard) are free. The daily budget is a
  * hard stop under concurrency because admission <em>reserves</em> tokens and settlement releases them.
  *
@@ -59,8 +61,6 @@ public class DaemonRuntime {
 
     private static final Logger log = LoggerFactory.getLogger(DaemonRuntime.class);
 
-    /** Reservation / conservative charge for an LLM run whose job sets no {@code max_tokens}. */
-    static final int DEFAULT_TOKEN_CHARGE = 4096;
 
     private final Map<JobKind, DaemonExecutor> executors = new EnumMap<>(JobKind.class);
     private final DaemonBudgetGuard budget;
@@ -72,6 +72,9 @@ public class DaemonRuntime {
 
     private final Semaphore slots;
     private final AtomicInteger waiting = new AtomicInteger();
+    private final AtomicInteger zombies = new AtomicInteger();
+    /** Process start: rows created before it belong to a previous process (restart recovery). */
+    private final Instant processStart = Instant.now();
     private final Map<String, Semaphore> allowSlots = new ConcurrentHashMap<>();
     private final ExecutorService dispatcher =
             Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("kukuvaia-daemon-", 0).factory());
@@ -100,6 +103,27 @@ public class DaemonRuntime {
         this.slots = new Semaphore(properties.getMaxConcurrent(), true);
         log.info("Daemon runtime ready: kinds={}, max-concurrent={}, max-queued={}",
                 executors.keySet(), properties.getMaxConcurrent(), properties.getMaxQueued());
+        if (properties.getAllowedTools().isEmpty()) {
+            log.warn("kukuvaia.daemon.allowed-tools is empty — unattended runs may use every tool their "
+                    + "specialist lists. Set an allowlist to narrow daemon tool access.");
+        }
+    }
+
+    /**
+     * Restart recovery: QUEUED/RUNNING rows created by a previous process can never finish. Mark them
+     * CANCELLED with a reason; interrupted LLM runs are charged a conservative estimate (their real
+     * usage was never recorded). Rows of this process are untouched.
+     */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void recoverInterruptedRuns() {
+        try {
+            int recovered = store.cancelInterrupted(processStart, JobLimits.defaults().tokenBudget());
+            if (recovered > 0) {
+                log.warn("Daemon restart recovery: {} run(s) from a previous process marked CANCELLED", recovered);
+            }
+        } catch (RuntimeException e) {
+            log.error("Daemon restart recovery failed: {}", e.getMessage());
+        }
     }
 
     @PreDestroy
@@ -176,30 +200,34 @@ public class DaemonRuntime {
                     ? "previous run still active (overlap: skip)"
                     : "max concurrent runs of this job reached (" + job.overlap().maxConcurrent() + ")");
         }
-        if (queued && waiting.get() >= properties.getMaxQueued()) {
-            releaseOverlap.run();
-            return skipped(job, request, "daemon queue full (" + properties.getMaxQueued() + ")");
-        }
+        // Everything acquired from here on is released on every non-admitted path (incl. exceptions).
+        boolean admitted = false;
+        boolean counted = false;
         int reserved = 0;
-        if (job.kind().consumesLocalTokens()) {
-            reserved = conservativeCharge(job);
-            if (!budget.tryReserve(reserved)) {
+        try {
+            if (queued) {
+                counted = true;
+                if (waiting.incrementAndGet() > properties.getMaxQueued()) {
+                    return skipped(job, request, "daemon queue full (" + properties.getMaxQueued() + ")");
+                }
+            }
+            if (job.kind().consumesLocalTokens()) {
+                int estimate = conservativeCharge(job);
+                if (!budget.tryReserve(estimate)) {
+                    return skipped(job, request, "daily token budget exhausted");
+                }
+                reserved = estimate;
+            }
+            long taskId = store.insertQueued(job, request);
+            admitted = true;
+            return new Admission(taskId, reserved, false, null, releaseOverlap, queued);
+        } finally {
+            if (!admitted) {
                 releaseOverlap.run();
-                return skipped(job, request, "daily token budget exhausted");
+                if (reserved > 0) budget.releaseReservation(reserved);
+                if (counted) waiting.decrementAndGet();
             }
         }
-        long taskId;
-        try {
-            taskId = store.insertQueued(job, request);
-        } catch (RuntimeException e) {
-            releaseOverlap.run();
-            budget.releaseReservation(reserved);
-            throw e;
-        }
-        if (queued) {
-            waiting.incrementAndGet();
-        }
-        return new Admission(taskId, reserved, false, null, releaseOverlap, queued);
     }
 
     private Admission skipped(DaemonJobDefinition job, JobRequest request, String reason) {
@@ -247,6 +275,7 @@ public class DaemonRuntime {
         Instant startedAt = Instant.now();
         long startNanos = System.nanoTime();
         boolean settled = false;
+        CountDownLatch callDone = null;
         try {
             store.markRunning(taskId);
             Duration timeout = job.limits().timeout();
@@ -258,7 +287,15 @@ public class DaemonRuntime {
             DaemonTaskStatus status;
             String error = null;
             int charge;
-            Future<ExecutionOutcome> call = callRunner.submit(() -> executor.execute(invocation, job.limits()));
+            CountDownLatch workDone = new CountDownLatch(1);
+            Future<ExecutionOutcome> call = callRunner.submit(() -> {
+                try {
+                    return executor.execute(invocation, job.limits());
+                } finally {
+                    workDone.countDown();
+                }
+            });
+            callDone = workDone;
             try {
                 outcome = call.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
                 status = DaemonTaskStatus.COMPLETED;
@@ -307,7 +344,7 @@ public class DaemonRuntime {
             }
             if (interrupted) Thread.currentThread().interrupt();
             return terminal(taskId, job, request, status, outcome, error, charge, durationMs, startedAt, Instant.now());
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             // Infrastructure failure (e.g. markRunning). Record as FAILED, keep tokens safe.
             long durationMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
             String error = errorSanitizer.sanitize(e.getMessage());
@@ -320,11 +357,55 @@ public class DaemonRuntime {
                 log.error("Daemon task {} could not be marked FAILED: {}", taskId, ignored.getMessage());
             }
             recordMetrics(job, DaemonTaskStatus.FAILED, durationMs);
+            if (e instanceof Error err) throw err;
             return terminal(taskId, job, request, DaemonTaskStatus.FAILED, null, error, 0, durationMs, startedAt, Instant.now());
         } finally {
-            if (haveSlot) slots.release();
-            admission.releaseOverlap().run();
+            releaseWhenWorkEnds(job, taskId, callDone, haveSlot, admission.releaseOverlap());
         }
+    }
+
+    /**
+     * Release the run's slot and overlap lock — but only once the work has really stopped. A run that
+     * ignores interruption after its deadline keeps both (it still counts against max-concurrent and
+     * overlap: skip), and they are released by a hook when it finally returns.
+     */
+    private void releaseWhenWorkEnds(DaemonJobDefinition job, long taskId, CountDownLatch callDone,
+                                     boolean haveSlot, Runnable releaseOverlap) {
+        Runnable release = () -> {
+            if (haveSlot) slots.release();
+            releaseOverlap.run();
+        };
+        boolean finished = callDone == null || callDone.getCount() == 0;
+        if (!finished) {
+            try {
+                finished = callDone.await(properties.getCancelGraceMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (finished) {
+            release.run();
+            return;
+        }
+        zombies.incrementAndGet();
+        log.error("Daemon task {} ('{}') did not stop after cancellation — holding its slot until it ends",
+                taskId, job.name());
+        Thread.ofVirtual().name("kukuvaia-daemon-zombie-" + taskId).start(() -> {
+            try {
+                callDone.await();
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            } finally {
+                zombies.decrementAndGet();
+                release.run();
+                log.warn("Daemon task {} ('{}') finally stopped — slot released", taskId, job.name());
+            }
+        });
+    }
+
+    /** Runs that missed their deadline and ignore interruption (monitoring / API). */
+    public int zombieRuns() {
+        return zombies.get();
     }
 
     /** Record usage against the budget. Returns true once the reservation has been released. */
@@ -359,6 +440,10 @@ public class DaemonRuntime {
             return outcome.totalTokens(); // e.g. a Java job that called a specialist
         }
         if (outcome.usageReported()) {
+            if (outcome.totalTokens() > job.limits().tokenBudget()) {
+                log.warn("Daemon job '{}' used {} tokens, above its token_budget of {} — raise the budget or the "
+                        + "reservation under-protects the daily cap", job.name(), outcome.totalTokens(), job.limits().tokenBudget());
+            }
             return outcome.totalTokens();
         }
         int estimate = conservativeCharge(job);
@@ -366,9 +451,14 @@ public class DaemonRuntime {
         return estimate;
     }
 
+    /**
+     * Reservation and fail-closed charge for one run: its {@code token_budget} — the cumulative
+     * prompt + completion tokens a run may spend over all tool rounds. ({@code max_tokens} only caps
+     * a single response and would under-reserve multi-round runs.)
+     */
     private static int conservativeCharge(DaemonJobDefinition job) {
         if (!job.kind().consumesLocalTokens()) return 0;
-        return job.limits().maxTokens() > 0 ? job.limits().maxTokens() : DEFAULT_TOKEN_CHARGE;
+        return job.limits().tokenBudget();
     }
 
     /** Failures raised before any model call — these cost nothing. */

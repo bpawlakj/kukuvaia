@@ -122,14 +122,23 @@ public class SubAgentFactory {
         return executeForResult(task, specialistType, context, providerOverride, currentDepth, personaTools, 0);
     }
 
-    /**
-     * Variant used by the daemon runtime: {@code maxToolRoundsCap > 0} lowers (never raises) the
-     * specialist's {@code max_tool_rounds} for this call.
-     */
+    /** Variant without a max_tokens cap. */
     public SubAgentResult executeForResult(String task, String specialistType,
                                            ExecutionContext context, String providerOverride,
                                            int currentDepth, Collection<String> personaTools,
                                            int maxToolRoundsCap) {
+        return executeForResult(task, specialistType, context, providerOverride, currentDepth, personaTools,
+                maxToolRoundsCap, 0);
+    }
+
+    /**
+     * Variant used by the daemon runtime: {@code maxToolRoundsCap > 0} / {@code maxTokensCap > 0} lower
+     * (never raise) the specialist's {@code max_tool_rounds} / {@code max_tokens} for this call.
+     */
+    public SubAgentResult executeForResult(String task, String specialistType,
+                                           ExecutionContext context, String providerOverride,
+                                           int currentDepth, Collection<String> personaTools,
+                                           int maxToolRoundsCap, int maxTokensCap) {
         // Security: depth guard — prevent recursive spawning
         guard.validateDepth(currentDepth);
 
@@ -139,7 +148,7 @@ public class SubAgentFactory {
         String[] providerHolder = {"unresolved"};
         try {
             return runSpecialist(task, specialistType, context, providerOverride, personaTools,
-                    null, currentDepth, providerHolder, maxToolRoundsCap);
+                    null, currentDepth, providerHolder, maxToolRoundsCap, maxTokensCap);
         } catch (SubAgentTimeoutException e) {
             status = "timeout";
             throw e;
@@ -195,7 +204,7 @@ public class SubAgentFactory {
                 try {
                     String result = runSpecialist(task.task(), task.specialistType(),
                             context, providerOverride, personaTools, workerModel, 0,
-                            new String[]{"worker-pool"}, 0).content();
+                            new String[]{"worker-pool"}, 0, 0).content();
                     long duration = System.currentTimeMillis() - start;
                     log.info("Worker '{}' completed in {}ms", task.specialistType(), duration);
                     return new WorkerResult(task.specialistType(),
@@ -232,7 +241,8 @@ public class SubAgentFactory {
     private SubAgentResult runSpecialist(String task, String specialistType,
                                          ExecutionContext context, String providerOverride,
                                          Collection<String> personaTools, ChatModel modelOverride,
-                                         int currentDepth, String[] providerHolder, int maxToolRoundsCap) {
+                                         int currentDepth, String[] providerHolder, int maxToolRoundsCap,
+                                         int maxTokensCap) {
         guard.validateDepth(currentDepth);
 
         SubAgentSpec spec = specs.get(specialistType);
@@ -290,7 +300,7 @@ public class SubAgentFactory {
 
         long timeoutSeconds = spec.timeoutSeconds() > 0
                 ? spec.timeoutSeconds() : DEFAULT_TIMEOUT_SECONDS;
-        var chatOptions = buildSubAgentOptions(spec);
+        var chatOptions = buildSubAgentOptions(spec, maxTokensCap);
 
         Future<SubAgentResult> call = callExecutor.submit(() -> SubAgentResult.from(
                 subAgent.prompt()
@@ -337,9 +347,10 @@ public class SubAgentFactory {
      * Build chat options for sub-agent. Skips model override when tier-based resolution
      * was used (model already resolved from DB via role).
      */
-    private OpenAiChatOptions.Builder buildSubAgentOptions(SubAgentSpec spec) {
+    private OpenAiChatOptions.Builder buildSubAgentOptions(SubAgentSpec spec, int maxTokensCap) {
+        int maxTokens = maxTokensCap > 0 ? Math.min(spec.maxTokens(), maxTokensCap) : spec.maxTokens();
         var builder = OpenAiChatOptions.builder()
-                .maxTokens(spec.maxTokens())
+                .maxTokens(maxTokens)
                 .temperature(spec.temperature());
         // Only set model from YAML if no tier-based resolution (avoids overriding DB model)
         boolean tierResolved = spec.tier() != null && !spec.tier().isBlank();
