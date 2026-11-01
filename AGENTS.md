@@ -35,7 +35,7 @@ Automated/scheduled work (cron, PG NOTIFY, webhooks) uses SmartGate by default �
 
 ### Build on existing orchestration; do not introduce parallel frameworks
 - **Sub-agent work** lives in `ai.kukuvaia.agent.subagent.*` (`SubAgentFactory`, `SubAgentTool`, `SubAgentGuard`, `SubAgentSpecLoader`). Extend this package — do not add a second orchestration layer.
-- **Background work** uses Spring `@Scheduled` + `PgNotifyDebouncer` + `WebhookController`, gated by `DaemonScheduleGuard` (skip-if-running) and `DaemonBudgetGuard` (daily token cap, 80% alert, hard stop at limit). No separate scheduler.
+- **Background work** goes through `DaemonRuntime` (`ai.kukuvaia.agent.daemon`): a YAML job plus a `DaemonExecutor` kind (specialist, java, embabel, mcp), triggered by `DaemonCronScheduler`, `WebhookController`, `PgNotifyListener` → `PgNotifyDebouncer`, or `/api/daemon`. It is gated by the runtime's admission guards and `DaemonBudgetGuard` (daily token cap, 80% alert, reservation, hard stop). New background work = a new executor kind or `DaemonJob` bean + YAML, never a separate scheduler. See `docs/architecture/daemon-runtime.md`.
 - **LLM agent loop** uses Spring AI primitives first (`ChatClient`, `ToolCallAdvisor`, `MessageWindowChatMemory`, `Flux<ChatResponse>`). Introduce a custom component only when a concrete limitation is documented (as was done for `SubAgentGuard` and advisor ordering).
 > Source: `docs/architecture/agent-orchestration-decisions.md`.
 
@@ -82,7 +82,7 @@ When a recurring pattern, fix, or convention emerges during implementation that 
 ## References
 
 - `README.md` — top-level project overview and build commands.
-- `docs/architecture/` — auth-and-providers, chat-flow, memory-architecture, agent-orchestration-decisions, security-review, tool-filtering, design-system, embabel-integration.
+- `docs/architecture/` — auth-and-providers, chat-flow, memory-architecture, agent-orchestration-decisions, daemon-runtime, security-review, tool-filtering, design-system, embabel-integration.
 - `docs/analyzes/` — research that informed decisions (e.g. `koog-ai-evaluation.md` — rejected; ideas adopted instead).
 - `docs/reference/` — operational specs (`smartgate-models.md`, `smartgate-timeout.md`, `test-scenarios.md`).
 - `docs/work/ROADMAP.md` — cross-initiative status.
