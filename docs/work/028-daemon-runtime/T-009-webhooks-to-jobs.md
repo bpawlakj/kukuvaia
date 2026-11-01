@@ -1,11 +1,11 @@
 ---
 id: T-009
 title: "Generic webhooks → jobs (202 + task id); /ci and /alert as YAML; fix devops"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: af28c60
 depends_on: [T-008]
 blocks: [T-016]
 plan_anchor: d3--job-definitions-triggers-notifications

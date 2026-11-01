@@ -1,11 +1,11 @@
 ---
 id: T-011
 title: "NotificationSink SPI + Log + signed Webhook sinks"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: c77690c
 depends_on: [T-008]
 blocks: [T-016]
 plan_anchor: d3--job-definitions-triggers-notifications

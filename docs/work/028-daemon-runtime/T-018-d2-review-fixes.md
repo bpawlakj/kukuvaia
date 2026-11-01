@@ -1,11 +1,11 @@
 ---
 id: T-018
 title: "Follow-up to T-005..T-008: close D2 security-review findings"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: c515d4a
 depends_on: [T-005, T-006, T-007, T-008]
 blocks: [T-016]
 plan_anchor: d2--runtime-core-executor-spi-persistence-api

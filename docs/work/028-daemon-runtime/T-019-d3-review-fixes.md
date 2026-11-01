@@ -1,11 +1,11 @@
 ---
 id: T-019
 title: "Follow-up to T-009..T-011: close D3 security-review findings"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 1030db0
 depends_on: [T-009, T-010, T-011]
 blocks: [T-016]
 plan_anchor: d3--job-definitions-triggers-notifications

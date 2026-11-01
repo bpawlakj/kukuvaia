@@ -1,11 +1,11 @@
 ---
 id: T-010
 title: "PG NOTIFY listener → PgNotifyDebouncer → job"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: f6b3d79
 depends_on: [T-008]
 blocks: [T-016]
 plan_anchor: d3--job-definitions-triggers-notifications
