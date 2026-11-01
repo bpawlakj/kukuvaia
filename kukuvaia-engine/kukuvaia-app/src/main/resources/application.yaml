@@ -10,6 +10,7 @@ kukuvaia:
     max-parallel-workers: 3
   webhooks:
     rate-limit-per-minute: 10
+    max-tracked-sources: 10000
     secret: ${WEBHOOK_SECRET:}
   providers:
     copilot:

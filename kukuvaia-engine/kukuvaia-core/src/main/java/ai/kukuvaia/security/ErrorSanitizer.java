@@ -38,12 +38,12 @@ public class ErrorSanitizer {
             // JWT tokens
             Pattern.compile("eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+"),
             // GitHub OAuth tokens
-            Pattern.compile("gho_[A-Za-z0-9]+"),
+            Pattern.compile("(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+"),
             // Bearer tokens in headers
-            Pattern.compile("Bearer\\s+[A-Za-z0-9._-]+", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("Bearer\\s+[A-Za-z0-9._~+/-]+=*", Pattern.CASE_INSENSITIVE),
             // File paths that reveal server structure
-            Pattern.compile("/home/[a-z]+/[^\\s]+"),
-            Pattern.compile("/opt/[a-z]+/[^\\s]+"),
+            Pattern.compile("(?<![\\w:/])/(?:[^\\s/]+/)*[^\\s/]+"),
+            Pattern.compile("\\b[A-Z]:\\\\[^\\s]+", Pattern.CASE_INSENSITIVE),
             // Environment variable references
             Pattern.compile("\\$\\{[A-Z_]+}"),
             // Stack trace frames

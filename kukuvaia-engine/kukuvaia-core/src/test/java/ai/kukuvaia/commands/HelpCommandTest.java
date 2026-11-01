@@ -73,18 +73,18 @@ class HelpCommandTest {
                 .extracting(TextBlock::content)
                 .noneMatch(c -> c.startsWith("Persona tools"));
 
-        // General tools = registry minus union = startPlanning, list_plans
+        // An unrestricted persona can use every registered tool.
         assertThat(textBlocks)
                 .anyMatch(tb -> tb.content().startsWith("General tools:")
                         && tb.content().contains("startPlanning")
                         && tb.content().contains("list_plans")
-                        && !tb.content().contains("tool_persona_alpha")
-                        && !tb.content().contains("tool_persona_beta"));
+                        && tb.content().contains("tool_persona_alpha")
+                        && tb.content().contains("tool_persona_beta"));
     }
 
     @Test
-    @DisplayName("named persona (test-persona) — Persona tools section + General tools section")
-    void namedPersona_personaPlusGeneral() {
+    @DisplayName("restricted persona — only explicitly allowed registered tools")
+    void namedPersona_onlyWhitelistedTools() {
         when(personaService.getActivePersona("s1"))
                 .thenReturn(new PersonaSpec(
                         "test-persona", "trusted operator", "prompt",
@@ -104,11 +104,10 @@ class HelpCommandTest {
                         && tb.content().contains("tool_persona_beta")
                         && !tb.content().contains("tool_persona_gamma"));
 
-        // General tools still present, still excludes the persona's MCP tools
         assertThat(textBlocks)
-                .anyMatch(tb -> tb.content().startsWith("General tools:")
-                        && tb.content().contains("startPlanning")
-                        && tb.content().contains("list_plans"));
+                .noneMatch(tb -> tb.content().startsWith("General tools:")
+                        || tb.content().contains("startPlanning")
+                        || tb.content().contains("list_plans"));
     }
 
     @Test

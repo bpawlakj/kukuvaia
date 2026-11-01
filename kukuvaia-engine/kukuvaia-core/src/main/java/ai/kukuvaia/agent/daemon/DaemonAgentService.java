@@ -138,20 +138,20 @@ public class DaemonAgentService {
 
     private long insertTask(String name, String specialist, String prompt, String trigger) {
         return jdbc.queryForObject(
-                "INSERT INTO daemon_tasks (name, specialist_type, prompt, trigger_source, " +
+                "INSERT INTO kukuvaia_agent.daemon_tasks (name, specialist_type, prompt, trigger_source, " +
                 "status, started_at, created_at) VALUES (?, ?, ?, ?, 'RUNNING', now(), now()) " +
                 "RETURNING id",
                 Long.class, name, specialist, prompt, trigger);
     }
 
     private void completeTask(long id, String result, long durationMs) {
-        jdbc.update("UPDATE daemon_tasks SET status = 'COMPLETED', result = ?, " +
+        jdbc.update("UPDATE kukuvaia_agent.daemon_tasks SET status = 'COMPLETED', result = ?, " +
                 "duration_ms = ?, completed_at = now() WHERE id = ?",
                 result, durationMs, id);
     }
 
     private void failTask(long id, String error, long durationMs) {
-        jdbc.update("UPDATE daemon_tasks SET status = 'FAILED', result = ?, " +
+        jdbc.update("UPDATE kukuvaia_agent.daemon_tasks SET status = 'FAILED', result = ?, " +
                 "duration_ms = ?, completed_at = now() WHERE id = ?",
                 error, durationMs, id);
     }

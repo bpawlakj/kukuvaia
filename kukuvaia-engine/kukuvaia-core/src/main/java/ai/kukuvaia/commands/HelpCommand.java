@@ -18,25 +18,13 @@ import java.util.Set;
 /**
  * /help — persona-aware listing of commands, tools, and skills.
  *
- * <p>Tools are split into TWO sections:
- * <ul>
- *   <li><b>Persona tools</b> — registered tools that fall under the active persona's
- *       {@code toolFilter}. Shown only when a non-default persona is active. These are typically
- *       MCP tools mounted by that persona via its YAML whitelist.</li>
- *   <li><b>General tools</b> — registered tools that are NOT in any named persona's
- *       {@code toolFilter}. These are always reachable regardless of persona — typically internal
- *       kukuvaia tools (planning, sessions, etc.).</li>
- * </ul>
- *
- * <p>Default persona ({@code assistant}) shows General tools only. Named persona shows Persona
- * tools first, then General tools, so the operator immediately sees what was unlocked by switching.
+ * <p>A nonempty persona filter lists only registered tools explicitly allowed by that persona.
+ * An empty filter leaves all registered tools available, matching AgentService's request scope.
  *
  * <p>Uses ApplicationContext for lazy CommandRegistry lookup to break circular dependency.
  */
 @Component
 public class HelpCommand implements SlashCommand {
-
-    private static final String DEFAULT_PERSONA = "assistant";
 
     private final ApplicationContext applicationContext;
     private final ToolRegistryConfig toolRegistry;
@@ -76,25 +64,11 @@ public class HelpCommand implements SlashCommand {
         Set<String> registered = new LinkedHashSet<>(toolRegistry.toolNames());
         if (!registered.isEmpty()) {
             PersonaSpec persona = personaService.getActivePersona(sessionId);
-            Set<String> namedUnion = personaService.namedPersonaToolUnion();
-
-            boolean isNamedPersona = !DEFAULT_PERSONA.equals(persona.name());
-
-            if (isNamedPersona) {
-                Set<String> personaTools = new LinkedHashSet<>(persona.toolFilter());
-                personaTools.retainAll(registered); // only show tools that ACTUALLY exist in registry
-                if (!personaTools.isEmpty()) {
-                    blocks.add(new TextBlock(
-                            "Persona tools (" + persona.name() + "): " + String.join(", ", personaTools),
-                            null));
-                }
-            }
-
-            // General tools: registered tools NOT belonging to any named persona's whitelist
-            Set<String> general = new LinkedHashSet<>(registered);
-            general.removeAll(namedUnion);
-            if (!general.isEmpty()) {
-                blocks.add(new TextBlock("General tools: " + String.join(", ", general), null));
+            boolean restricted = !persona.toolFilter().isEmpty();
+            if (restricted) registered.retainAll(persona.toolFilter());
+            if (!registered.isEmpty()) {
+                String label = restricted ? "Persona tools (" + persona.name() + "): " : "General tools: ";
+                blocks.add(new TextBlock(label + String.join(", ", registered), null));
             }
         }
 

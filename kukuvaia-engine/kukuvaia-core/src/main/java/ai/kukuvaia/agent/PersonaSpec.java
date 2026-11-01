@@ -18,13 +18,13 @@ public record PersonaSpec(
         @JsonProperty("name") String name,
         @JsonProperty("description") String description,
         @JsonProperty("system_prompt") @JsonAlias("systemPrompt") String systemPrompt,
-        @JsonProperty("tools") @JsonAlias("toolFilter") List<String> toolFilter
+        @JsonProperty("tools") @JsonAlias({"toolFilter", "tool_filter"}) List<String> toolFilter
 ) {
     @JsonCreator
     public PersonaSpec {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("Persona name is required");
         }
-        if (toolFilter == null) toolFilter = List.of();
+        toolFilter = toolFilter == null ? List.of() : List.copyOf(toolFilter);
     }
 }

@@ -98,11 +98,8 @@ public class PersonaService {
     /**
      * Union of every named (non-default) persona's {@code toolFilter}.
      *
-     * <p>Used by {@code /help} to draw the line between "general" tools (always reachable, regardless
-     * of which persona is active — typically internal kukuvaia tools like planning) and
-     * "persona-specific" tools (only reachable when a particular persona is active — typically MCP
-     * tools mounted by that persona). The default persona contributes nothing because its
-     * {@code toolFilter} is empty (= "no opinion, all tools allowed").
+     * <p>Configuration inventory only, never an authorization rule. Each request uses the active
+     * persona's own filter. An empty filter means all registered tools are allowed.
      */
     public Set<String> namedPersonaToolUnion() {
         Set<String> union = new LinkedHashSet<>();

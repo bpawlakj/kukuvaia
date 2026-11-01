@@ -2,6 +2,8 @@ package ai.kukuvaia.security;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -90,5 +92,19 @@ class ErrorSanitizerTest {
         assertThat(sanitizer.sanitize(msg))
                 .contains("[REDACTED]")
                 .doesNotContain("admin:s3cret");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/Users/test/config.yaml", "/etc/kukuvaia/config.yaml",
+            "/private/tmp/engine.log", "C:\\Users\\test\\config.yaml"})
+    void sanitize_redactsAbsolutePaths(String path) {
+        assertThat(sanitizer.sanitize("Cannot read " + path))
+                .isEqualTo("Cannot read [REDACTED]");
+    }
+
+    @Test
+    void sanitize_redactsFullBearerTokenBeforeTruncation() {
+        assertThat(sanitizer.sanitize("Failed: Bearer " + "x".repeat(600) + "+/tail=="))
+                .isEqualTo("Failed: [REDACTED]");
     }
 }

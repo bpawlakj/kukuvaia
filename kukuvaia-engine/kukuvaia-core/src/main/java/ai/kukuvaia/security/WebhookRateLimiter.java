@@ -7,15 +7,17 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.time.Instant;
+import java.time.Clock;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Rate limits webhook requests per source IP using sliding window.
@@ -29,14 +31,36 @@ public class WebhookRateLimiter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(WebhookRateLimiter.class);
 
-    @Value("${kukuvaia.webhooks.rate-limit-per-minute:10}")
-    private int maxPerMinute;
+    private static final long WINDOW_MILLIS = 60_000;
+    private static final long CAPACITY_CLEANUP_INTERVAL_MILLIS = 1_000;
 
-    private final Map<String, WindowCounter> counters = new ConcurrentHashMap<>();
+    private final int maxPerMinute;
+    private final int maxTrackedSources;
+    private final Clock clock;
+    private final Map<String, WindowCounter> counters = new HashMap<>();
+    private long lastCleanup;
+
+    @Autowired
+    public WebhookRateLimiter(
+            @Value("${kukuvaia.webhooks.rate-limit-per-minute:10}") int maxPerMinute,
+            @Value("${kukuvaia.webhooks.max-tracked-sources:10000}") int maxTrackedSources) {
+        this(maxPerMinute, maxTrackedSources, Clock.systemUTC());
+    }
+
+    WebhookRateLimiter(int maxPerMinute, int maxTrackedSources, Clock clock) {
+        if (maxPerMinute <= 0 || maxTrackedSources <= 0) {
+            throw new IllegalArgumentException("Webhook rate limits must be positive");
+        }
+        this.maxPerMinute = maxPerMinute;
+        this.maxTrackedSources = maxTrackedSources;
+        this.clock = clock;
+        this.lastCleanup = clock.millis();
+    }
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith("/api/webhooks");
+        String path = request.getRequestURI();
+        return !path.equals("/api/webhooks") && !path.startsWith("/api/webhooks/");
     }
 
     @Override
@@ -45,13 +69,10 @@ public class WebhookRateLimiter extends OncePerRequestFilter {
                                      FilterChain filterChain)
             throws ServletException, IOException {
 
-        String clientIp = resolveClientIp(request);
-        WindowCounter counter = counters.computeIfAbsent(clientIp,
-                k -> new WindowCounter());
-
-        if (!counter.tryAcquire(maxPerMinute)) {
-            log.warn("Webhook rate limit exceeded for IP {}: {}/min",
-                    clientIp, maxPerMinute);
+        // Forwarding headers are untrusted input. A trusted proxy/container may normalize
+        // remoteAddr before this filter; this filter must never parse caller-supplied XFF.
+        if (!tryAcquire(request.getRemoteAddr())) {
+            log.debug("Webhook rate limit exceeded");
             response.setHeader("Retry-After", "60");
             response.sendError(429, "Rate limit exceeded");
             return;
@@ -60,33 +81,45 @@ public class WebhookRateLimiter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
-    private String resolveClientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            return forwarded.split(",")[0].trim();
+    private synchronized boolean tryAcquire(String clientIp) {
+        long now = clock.millis();
+        long cutoff = now - WINDOW_MILLIS;
+        long cleanupInterval = counters.size() >= maxTrackedSources
+                ? CAPACITY_CLEANUP_INTERVAL_MILLIS : WINDOW_MILLIS;
+        if (now - lastCleanup >= cleanupInterval) {
+            counters.values().removeIf(counter -> counter.expired(cutoff));
+            lastCleanup = now;
         }
-        return request.getRemoteAddr();
+
+        WindowCounter counter = counters.get(clientIp);
+        if (counter == null) {
+            // Do not evict active sources: that would let a flood reset their quotas.
+            if (counters.size() >= maxTrackedSources) {
+                return false;
+            }
+            counter = new WindowCounter();
+            counters.put(clientIp, counter);
+        }
+        return counter.tryAcquire(maxPerMinute, now, cutoff);
     }
 
-    /**
-     * Simple sliding window counter. Resets every minute.
-     * Thread-safe via AtomicInteger + volatile.
-     */
-    static class WindowCounter {
-        private volatile long windowStart = Instant.now().getEpochSecond() / 60;
-        private final AtomicInteger count = new AtomicInteger(0);
+    /** Accessed only under the limiter's lock; each queue holds at most maxPerMinute entries. */
+    private static class WindowCounter {
+        private final Deque<Long> acceptedRequests = new ArrayDeque<>();
 
-        boolean tryAcquire(int limit) {
-            long currentWindow = Instant.now().getEpochSecond() / 60;
-            if (currentWindow != windowStart) {
-                synchronized (this) {
-                    if (currentWindow != windowStart) {
-                        windowStart = currentWindow;
-                        count.set(0);
-                    }
-                }
+        boolean expired(long cutoff) {
+            return acceptedRequests.isEmpty() || acceptedRequests.peekLast() <= cutoff;
+        }
+
+        boolean tryAcquire(int limit, long now, long cutoff) {
+            while (!acceptedRequests.isEmpty() && acceptedRequests.peekFirst() <= cutoff) {
+                acceptedRequests.removeFirst();
             }
-            return count.incrementAndGet() <= limit;
+            if (acceptedRequests.size() >= limit) {
+                return false;
+            }
+            acceptedRequests.addLast(now);
+            return true;
         }
     }
 }
