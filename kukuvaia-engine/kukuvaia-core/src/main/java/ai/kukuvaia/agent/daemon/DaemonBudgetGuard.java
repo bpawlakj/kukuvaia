@@ -130,6 +130,11 @@ public class DaemonBudgetGuard {
                 tokenCount, taskId, todayTotal, dailyTokenBudget);
     }
 
+    /** Tokens recorded today across all daemon tasks. */
+    public int todayTokenUsage() {
+        return getTodayTokenUsage();
+    }
+
     /**
      * Get remaining budget for today.
      */

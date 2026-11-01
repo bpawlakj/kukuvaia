@@ -121,6 +121,13 @@ class DaemonTaskMigrationTest {
                 String.class)).isEqualTo("all good");
         assertThat(jdbc.queryForObject("SELECT error IS NOT NULL AND result IS NULL FROM kukuvaia_agent.daemon_tasks "
                 + "WHERE status = 'FAILED'", Boolean.class)).as("V23 error text moved to error column").isTrue();
+        // Retention: only finished rows older than the window are pruned.
+        jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status, created_at) "
+                + "VALUES ('old', 'java', 't', 'cron', 'COMPLETED', now() - interval '40 days'), "
+                + "('old-running', 'java', 't', 'cron', 'RUNNING', now() - interval '40 days')");
+        assertThat(new DaemonTaskStore(jdbc).pruneOlderThan(30)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM kukuvaia_agent.daemon_tasks WHERE name = 'old-running'",
+                Integer.class)).isEqualTo(1);
         // New lifecycle states are accepted; unknown ones are not.
         jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
                 + "VALUES ('scan', 'java', 'astralScan', 'cron', 'QUEUED')");

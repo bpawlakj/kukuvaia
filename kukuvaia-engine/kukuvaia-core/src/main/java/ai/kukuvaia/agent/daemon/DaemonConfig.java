@@ -45,6 +45,16 @@ public class DaemonConfig {
         /** Time zone for cron expressions; empty = system default. */
         private String zone = "";
 
+        /** Finished daemon_tasks rows older than this are deleted by the retention job. */
+        private int retentionDays = 30;
+        /** Allow manual runs and full task results over the API while kukuvaia.security.dev-mode=true. */
+        private boolean apiAllowInDevMode = false;
+
+        public int getRetentionDays() { return retentionDays; }
+        public void setRetentionDays(int days) { this.retentionDays = Math.max(1, days); }
+        public boolean isApiAllowInDevMode() { return apiAllowInDevMode; }
+        public void setApiAllowInDevMode(boolean allow) { this.apiAllowInDevMode = allow; }
+
         public boolean isProjectJobs() { return projectJobs; }
         public void setProjectJobs(boolean projectJobs) { this.projectJobs = projectJobs; }
         public int getSchedulerPoolSize() { return schedulerPoolSize; }

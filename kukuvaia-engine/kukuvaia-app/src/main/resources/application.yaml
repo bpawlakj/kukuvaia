@@ -23,6 +23,12 @@ kukuvaia:
     project-jobs: ${KUKUVAIA_DAEMON_PROJECT_JOBS:false}
     scheduler-pool-size: 2
     zone: ${KUKUVAIA_DAEMON_ZONE:}
+    # Finished daemon_tasks rows older than this are deleted nightly.
+    retention-days: 30
+    retention-cron: "0 30 3 * * *"
+    # /api/daemon manual runs and full results are refused while security.dev-mode=true (API auth is
+    # bypassed then). Set to true only for local use.
+    api-allow-in-dev-mode: ${KUKUVAIA_DAEMON_API_ALLOW_IN_DEV_MODE:false}
   subagent:
     max-parallel-workers: 3
   webhooks:
