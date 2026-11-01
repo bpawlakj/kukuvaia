@@ -234,6 +234,30 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    @DisplayName("T-012: a run stopped mid-way with reported usage is charged that usage; deadline flag → TIMEOUT; unreported → token_budget")
+    void executionFailed_chargesReportedUsage() {
+        var seq = new AtomicInteger();
+        runtime(100_000, executor(JobKind.EMBABEL, inv -> {
+            throw switch (seq.incrementAndGet()) {
+                case 1 -> new ai.kukuvaia.agent.daemon.exec.ExecutionFailedException("terminated early: budget", 1200, 800, true, false);
+                case 2 -> new ai.kukuvaia.agent.daemon.exec.ExecutionFailedException("deadline", 10, 5, true, true);
+                default -> new ai.kukuvaia.agent.daemon.exec.ExecutionFailedException("unknown usage", 0, 0, false, false);
+            };
+        }));
+
+        DaemonTaskResult early = runtime.runSync(job("e1", JobKind.EMBABEL, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
+        DaemonTaskResult late = runtime.runSync(job("e2", JobKind.EMBABEL, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
+        DaemonTaskResult unknown = runtime.runSync(job("e3", JobKind.EMBABEL, LIMITS, Overlap.skip()), JobRequest.of("p", "m"));
+
+        assertThat(early.status()).isEqualTo(DaemonTaskStatus.FAILED);
+        assertThat(early.tokenUsage()).isEqualTo(2000);
+        assertThat(late.status()).isEqualTo(DaemonTaskStatus.TIMEOUT);
+        assertThat(late.tokenUsage()).isEqualTo(15);
+        assertThat(unknown.tokenUsage()).isEqualTo(LIMITS.tokenBudget());
+        assertThat(ledger.get()).isEqualTo(2000 + 15 + LIMITS.tokenBudget());
+    }
+
+    @Test
     @DisplayName("error text is sanitized before it is stored")
     void error_sanitized() {
         runtime(100_000, executor(JobKind.JAVA, inv -> {

@@ -327,10 +327,18 @@ public class DaemonRuntime {
                 charge = conservativeCharge(job);
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause() != null ? e.getCause() : e;
-                status = cause instanceof SubAgentFactory.SubAgentTimeoutException
-                        ? DaemonTaskStatus.TIMEOUT : DaemonTaskStatus.FAILED;
+                boolean timedOut = cause instanceof SubAgentFactory.SubAgentTimeoutException
+                        || (cause instanceof ai.kukuvaia.agent.daemon.exec.ExecutionFailedException f && f.timedOut());
+                status = timedOut ? DaemonTaskStatus.TIMEOUT : DaemonTaskStatus.FAILED;
                 error = errorSanitizer.sanitize(cause.getMessage() != null ? cause.getMessage() : cause.toString());
-                charge = isPreflight(cause) ? 0 : conservativeCharge(job);
+                if (isPreflight(cause)) {
+                    charge = 0;
+                } else if (cause instanceof ai.kukuvaia.agent.daemon.exec.ExecutionFailedException f && f.usageReported()
+                        && job.kind().consumesLocalTokens()) {
+                    charge = f.totalTokens(); // real usage of a run stopped mid-way (e.g. Embabel budget)
+                } else {
+                    charge = conservativeCharge(job);
+                }
             } catch (InterruptedException e) {
                 call.cancel(true);
                 status = DaemonTaskStatus.CANCELLED;

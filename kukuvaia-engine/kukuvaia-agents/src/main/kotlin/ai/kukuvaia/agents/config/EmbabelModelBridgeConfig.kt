@@ -1,7 +1,11 @@
 package ai.kukuvaia.agents.config
 
+import ai.kukuvaia.agents.daemon.DaemonEmbabelRuns
 import ai.kukuvaia.provider.config.LlmProvidersProperties
 import ai.kukuvaia.provider.service.ChatModelCache
+import ai.kukuvaia.provider.service.LlmProviderService
+import io.micrometer.core.instrument.MeterRegistry
+import org.springframework.beans.factory.ObjectProvider
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.common.ai.model.*
 import org.slf4j.LoggerFactory
@@ -20,11 +24,17 @@ import org.springframework.context.annotation.Configuration
  * 1. App boots → ChatModelCache.warmUp() populates the cache from LlmProvidersProperties
  * 2. This config reads roles from LlmProvidersProperties and models from ChatModelCache
  * 3. Embabel agents can use ctx.ai().withLlmByRole("cheapest")
+ *
+ * Every model is wrapped in [GuardedChatModel]: Embabel calls `ChatModel` directly, so the guards
+ * kukuvaia's ChatClients get from advisors (tool-results-are-data boundary, audit metrics, daemon
+ * Copilot policy) are applied there.
  */
 @Configuration
 class EmbabelModelBridgeConfig(
     private val chatModelCache: ChatModelCache,
     private val providersProperties: LlmProvidersProperties,
+    private val daemonRuns: DaemonEmbabelRuns,
+    private val meterRegistry: ObjectProvider<MeterRegistry>,
 ) {
 
     private val log = LoggerFactory.getLogger(EmbabelModelBridgeConfig::class.java)
@@ -76,8 +86,12 @@ class EmbabelModelBridgeConfig(
     }
 
     // Embabel 1.5 replaced the deprecated `Llm` class with `SpringAiLlmService`.
-    private fun createLlm(name: String, chatModel: ChatModel): SpringAiLlmService =
-        SpringAiLlmService(name, "kukuvaia", chatModel, DefaultOptionsConverter)
+    private fun createLlm(name: String, chatModel: ChatModel): SpringAiLlmService {
+        val role = if (name == "fallback") "supervisor" else name
+        val copilot = chatModelCache.getProviderForRole(role).map { LlmProviderService.isCopilot(it) }.orElse(null)
+        val guarded = GuardedChatModel(name, chatModel, copilot, daemonRuns, meterRegistry.ifAvailable)
+        return SpringAiLlmService(name, "kukuvaia", guarded, DefaultOptionsConverter)
+    }
 }
 
 /**

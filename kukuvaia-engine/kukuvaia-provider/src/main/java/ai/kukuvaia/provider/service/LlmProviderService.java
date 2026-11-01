@@ -247,7 +247,8 @@ public class LlmProviderService {
     }
 
     /** Copilot = provider name/type "copilot" or a base URL on githubcopilot.com. */
-    static boolean isCopilot(ProviderRecord provider) {
+    /** Whether a provider is GitHub Copilot (by name, type or API host) — opt-in only for daemon work. */
+    public static boolean isCopilot(ProviderRecord provider) {
         if (isCopilotName(provider.name()) || isCopilotName(provider.type())) return true;
         String baseUrl = provider.baseUrl();
         if (baseUrl == null || baseUrl.isBlank()) return false;
@@ -260,7 +261,7 @@ public class LlmProviderService {
         }
     }
 
-    private static boolean isCopilotName(String value) {
+    public static boolean isCopilotName(String value) {
         return value != null && value.trim().toLowerCase(Locale.ROOT).contains("copilot");
     }
 
@@ -278,7 +279,7 @@ public class LlmProviderService {
                     .formatted(how));
         }
 
-        DaemonProviderPolicyException(String how, String reason) {
+        public DaemonProviderPolicyException(String how, String reason) {
             super("Daemon provider policy refused %s: %s".formatted(how, reason));
         }
     }
