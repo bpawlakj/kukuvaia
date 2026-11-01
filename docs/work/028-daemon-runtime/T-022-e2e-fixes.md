@@ -1,11 +1,11 @@
 ---
 id: T-022
 title: "Follow-up: defects found by end-to-end verification"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 6feee38
 depends_on: [T-008, T-016]
 blocks: []
 plan_anchor: verification
