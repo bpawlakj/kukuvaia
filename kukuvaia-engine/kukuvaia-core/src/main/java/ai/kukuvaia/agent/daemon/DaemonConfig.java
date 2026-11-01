@@ -31,6 +31,20 @@ public class DaemonConfig {
          */
         private List<String> allowedTools = new ArrayList<>();
 
+        /** Kill switch: when false no daemon run is admitted and no cron job is scheduled. */
+        private boolean enabled = true;
+        /** Daemon runs executing at the same time (all kinds together). */
+        private int maxConcurrent = 2;
+        /** Admitted runs waiting for a slot; beyond this, new runs are SKIPPED (backpressure). */
+        private int maxQueued = 100;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getMaxConcurrent() { return maxConcurrent; }
+        public void setMaxConcurrent(int maxConcurrent) { this.maxConcurrent = Math.max(1, maxConcurrent); }
+        public int getMaxQueued() { return maxQueued; }
+        public void setMaxQueued(int maxQueued) { this.maxQueued = Math.max(0, maxQueued); }
+
         public List<String> getAllowedTools() { return allowedTools; }
         public void setAllowedTools(List<String> allowedTools) {
             this.allowedTools = allowedTools == null ? new ArrayList<>() : allowedTools;

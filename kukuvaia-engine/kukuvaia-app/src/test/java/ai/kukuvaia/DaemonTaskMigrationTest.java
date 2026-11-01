@@ -5,6 +5,11 @@ import ai.kukuvaia.agent.daemon.DaemonBudgetGuard;
 import ai.kukuvaia.agent.daemon.DaemonScheduleGuard;
 import ai.kukuvaia.agent.daemon.NotificationSanitizer;
 import ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties;
+import ai.kukuvaia.agent.daemon.DaemonRuntime;
+import ai.kukuvaia.agent.daemon.DaemonTaskStore;
+import ai.kukuvaia.agent.daemon.exec.SpecialistExecutor;
+import ai.kukuvaia.security.ErrorSanitizer;
+import java.util.List;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.subagent.SubAgentResult;
 import ai.kukuvaia.api.webhook.WebhookController;
@@ -23,6 +28,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import tools.jackson.databind.ObjectMapper;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -51,10 +57,13 @@ class DaemonTaskMigrationTest {
         ReflectionTestUtils.setField(budget, "alertThreshold", 0.8);
         var specialists = mock(SubAgentFactory.class);
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull()))
+                eq(0), isNull(), anyInt()))
                 .thenReturn(new SubAgentResult("Build failure analyzed", 100, 23, true));
-        var daemon = new DaemonAgentService(specialists, budget, new DaemonScheduleGuard(),
-                new NotificationSanitizer(), jdbc, new SimpleMeterRegistry(), new DaemonProperties());
+        var properties = new DaemonProperties();
+        var runtime = new DaemonRuntime(List.of(new SpecialistExecutor(specialists, properties)), budget,
+                new DaemonScheduleGuard(), new DaemonTaskStore(jdbc), properties, new ErrorSanitizer(),
+                new SimpleMeterRegistry());
+        var daemon = new DaemonAgentService(runtime, specialists);
         var mvc = MockMvcBuilders.standaloneSetup(new WebhookController(daemon,
                         new PayloadSanitizer(new ObjectMapper())))
                 .addFilters(new WebhookRateLimiter(10, 100), new WebhookAuthFilter("", "test-token", true))
@@ -76,7 +85,7 @@ class DaemonTaskMigrationTest {
         assertThat(budget.getRemainingBudget()).isEqualTo(99_877);
 
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull()))
+                eq(0), isNull(), anyInt()))
                 .thenThrow(new IllegalStateException("Synthetic specialist failure"));
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
@@ -86,5 +95,38 @@ class DaemonTaskMigrationTest {
                 + "WHERE status = 'FAILED' AND completed_at IS NOT NULL", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT to_regclass('kukuvaia.daemon_tasks') IS NULL", Boolean.class))
                 .isTrue();
+    }
+
+    @Test
+    void v24_upgradesExistingV23Rows() {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(System.getenv("KUKUVAIA_TEST_DB_URL"), "postgres", ""));
+        String db = "mig_v23_" + Long.toHexString(System.nanoTime());
+        admin.execute("CREATE DATABASE " + db);
+        String url = System.getenv("KUKUVAIA_TEST_DB_URL").replaceFirst("/[^/?]+(\\?|$)", "/" + db + "$1");
+        var dataSource = new DriverManagerDataSource(url, "postgres", "");
+        var jdbc = new JdbcTemplate(dataSource);
+
+        Flyway.configure().dataSource(dataSource).schemas("kukuvaia").defaultSchema("kukuvaia")
+                .locations("classpath:db/migration").target("23").load().migrate();
+        jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, specialist_type, prompt, trigger_source, status, result) "
+                + "VALUES ('ci', 'analyst', 'p', 'webhook:ci', 'COMPLETED', 'all good'), "
+                + "('ci', 'analyst', 'p', 'webhook:ci', 'FAILED', 'Synthetic failure')");
+
+        Flyway.configure().dataSource(dataSource).schemas("kukuvaia").defaultSchema("kukuvaia")
+                .locations("classpath:db/migration").load().migrate();
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM kukuvaia_agent.daemon_tasks "
+                + "WHERE kind = 'specialist' AND target = 'analyst'", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT result FROM kukuvaia_agent.daemon_tasks WHERE status = 'COMPLETED'",
+                String.class)).isEqualTo("all good");
+        assertThat(jdbc.queryForObject("SELECT error IS NOT NULL AND result IS NULL FROM kukuvaia_agent.daemon_tasks "
+                + "WHERE status = 'FAILED'", Boolean.class)).as("V23 error text moved to error column").isTrue();
+        // New lifecycle states are accepted; unknown ones are not.
+        jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
+                + "VALUES ('scan', 'java', 'astralScan', 'cron', 'QUEUED')");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> jdbc.update(
+                "INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
+                        + "VALUES ('x', 'java', 't', 'cron', 'PENDING')"))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
     }
 }

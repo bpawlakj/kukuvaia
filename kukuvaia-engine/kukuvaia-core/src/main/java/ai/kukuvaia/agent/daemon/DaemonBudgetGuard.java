@@ -31,8 +31,62 @@ public class DaemonBudgetGuard {
 
     private final JdbcTemplate jdbc;
 
+    /**
+     * Tokens reserved by runs that are admitted but not yet settled. Reservations make the daily
+     * cap a hard stop under concurrency: without them N concurrent runs could all pass the check
+     * before any usage is recorded. Single-JVM (in-memory), like {@link DaemonScheduleGuard}.
+     */
+    private long reservedTokens;
+
     public DaemonBudgetGuard(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /**
+     * Reserve {@code tokens} of today's budget for a run that is about to start.
+     *
+     * @return {@code false} if recorded usage + outstanding reservations + {@code tokens} would
+     *         exceed the daily budget (the run must not start)
+     */
+    public synchronized boolean tryReserve(int tokens) {
+        int todayUsage = getTodayTokenUsage();
+        long committed = todayUsage + reservedTokens;
+        if (committed + tokens > dailyTokenBudget) {
+            log.warn("Daemon daily token budget would be exceeded: {} used + {} reserved + {} requested > {}",
+                    todayUsage, reservedTokens, tokens, dailyTokenBudget);
+            return false;
+        }
+        reservedTokens += tokens;
+        double ratio = (double) (committed + tokens) / dailyTokenBudget;
+        if (ratio >= alertThreshold) {
+            log.warn("Daemon token usage at {}% (incl. reservations): {}/{} tokens today",
+                    Math.round(ratio * 100), committed + tokens, dailyTokenBudget);
+        }
+        return true;
+    }
+
+    /** Return an unused reservation (run skipped or settled). */
+    public synchronized void releaseReservation(int tokens) {
+        reservedTokens = Math.max(0, reservedTokens - tokens);
+    }
+
+    /** Record the actual usage of a run and drop its reservation. */
+    public void settle(long taskId, int reserved, int actualTokens) {
+        try {
+            recordUsage(taskId, actualTokens);
+        } finally {
+            releaseReservation(reserved);
+        }
+    }
+
+    /** Outstanding reservations (monitoring / API). */
+    public synchronized long reservedTokens() {
+        return reservedTokens;
+    }
+
+    /** Configured daily budget (monitoring / API). */
+    public int dailyTokenBudget() {
+        return dailyTokenBudget;
     }
 
     /**

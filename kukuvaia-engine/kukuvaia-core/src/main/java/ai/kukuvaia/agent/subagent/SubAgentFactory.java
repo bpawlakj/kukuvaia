@@ -119,6 +119,17 @@ public class SubAgentFactory {
     public SubAgentResult executeForResult(String task, String specialistType,
                                            ExecutionContext context, String providerOverride,
                                            int currentDepth, Collection<String> personaTools) {
+        return executeForResult(task, specialistType, context, providerOverride, currentDepth, personaTools, 0);
+    }
+
+    /**
+     * Variant used by the daemon runtime: {@code maxToolRoundsCap > 0} lowers (never raises) the
+     * specialist's {@code max_tool_rounds} for this call.
+     */
+    public SubAgentResult executeForResult(String task, String specialistType,
+                                           ExecutionContext context, String providerOverride,
+                                           int currentDepth, Collection<String> personaTools,
+                                           int maxToolRoundsCap) {
         // Security: depth guard — prevent recursive spawning
         guard.validateDepth(currentDepth);
 
@@ -128,7 +139,7 @@ public class SubAgentFactory {
         String[] providerHolder = {"unresolved"};
         try {
             return runSpecialist(task, specialistType, context, providerOverride, personaTools,
-                    null, currentDepth, providerHolder);
+                    null, currentDepth, providerHolder, maxToolRoundsCap);
         } catch (SubAgentTimeoutException e) {
             status = "timeout";
             throw e;
@@ -183,7 +194,7 @@ public class SubAgentFactory {
                 try {
                     String result = runSpecialist(task.task(), task.specialistType(),
                             context, providerOverride, personaTools, workerModel, 0,
-                            new String[]{"worker-pool"}).content();
+                            new String[]{"worker-pool"}, 0).content();
                     long duration = System.currentTimeMillis() - start;
                     log.info("Worker '{}' completed in {}ms", task.specialistType(), duration);
                     return new WorkerResult(task.specialistType(),
@@ -220,12 +231,12 @@ public class SubAgentFactory {
     private SubAgentResult runSpecialist(String task, String specialistType,
                                          ExecutionContext context, String providerOverride,
                                          Collection<String> personaTools, ChatModel modelOverride,
-                                         int currentDepth, String[] providerHolder) {
+                                         int currentDepth, String[] providerHolder, int maxToolRoundsCap) {
         guard.validateDepth(currentDepth);
 
         SubAgentSpec spec = specs.get(specialistType);
         if (spec == null) {
-            throw new IllegalArgumentException("Unknown specialist type: " + specialistType);
+            throw new UnknownSpecialistException(specialistType);
         }
 
         // Security: filter tools (remove delegation tools + intersect with persona)
@@ -263,7 +274,8 @@ public class SubAgentFactory {
                 specialistType, resolvedProvider, context, safeTools.size(), currentDepth);
 
         // Security (DoS): every tool of this call shares the specialist's max_tool_rounds budget.
-        var toolLimiter = new ToolRoundLimiter(specialistType, spec.maxToolRounds());
+        int maxToolRounds = maxToolRoundsCap > 0 ? Math.min(spec.maxToolRounds(), maxToolRoundsCap) : spec.maxToolRounds();
+        var toolLimiter = new ToolRoundLimiter(specialistType, maxToolRounds);
 
         // Isolated ChatClient. ToolCallingAdvisor is auto-registered by Spring AI 2.x.
         ChatClient subAgent = ChatClient.builder(chatModel)
@@ -332,6 +344,13 @@ public class SubAgentFactory {
             builder.model(spec.model());
         }
         return builder;
+    }
+
+    /** The requested specialist is not defined (raised before any LLM call). */
+    public static class UnknownSpecialistException extends IllegalArgumentException {
+        public UnknownSpecialistException(String specialist) {
+            super("Unknown specialist type: " + specialist);
+        }
     }
 
     public static class SubAgentTimeoutException extends RuntimeException {

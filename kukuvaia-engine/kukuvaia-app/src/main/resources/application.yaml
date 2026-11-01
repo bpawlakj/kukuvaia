@@ -13,6 +13,11 @@ kukuvaia:
     # Global tool allowlist for every daemon run, intersected with each specialist's tools.
     # Empty = specialist allowlists only. Example: [read_file, search_content]
     allowed-tools: []
+    # Kill switch for all daemon work (cron, webhooks, PG NOTIFY, manual runs).
+    enabled: ${KUKUVAIA_DAEMON_ENABLED:true}
+    # Daemon runs executing at once (all kinds) and admitted runs allowed to wait for a slot.
+    max-concurrent: 2
+    max-queued: 100
   subagent:
     max-parallel-workers: 3
   webhooks:
