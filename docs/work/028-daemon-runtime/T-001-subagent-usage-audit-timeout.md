@@ -1,11 +1,11 @@
 ---
 id: T-001
 title: "SubAgentFactory: usage, ProviderAuditLog, own executor, cancel on timeout"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 7d2bdb0
 depends_on: []
 blocks: [T-002, T-004, T-005]
 plan_anchor: d1--fail-closed-controls-no-new-features

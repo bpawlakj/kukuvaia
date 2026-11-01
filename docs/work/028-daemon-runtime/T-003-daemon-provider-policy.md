@@ -1,11 +1,11 @@
 ---
 id: T-003
 title: "Daemon provider policy: DAEMON → daemon role, refuse Copilot unless explicit"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: bca203e
 depends_on: []
 blocks: [T-005, T-012]
 plan_anchor: d1--fail-closed-controls-no-new-features

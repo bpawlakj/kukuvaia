@@ -6,7 +6,9 @@
 
 ## Active
 
-_None._
+| ID | Initiative | Tasks (done/total) | Updated |
+|----|------------|---------------------|---------|
+| 028 | [daemon-runtime](028-daemon-runtime/) | 4/16 | 2026-11-01 |
 
 ## Backlog
 
@@ -39,7 +41,6 @@ _None._
 | 025 | [context-compaction](025-context-compaction/) | 0/1 | 2026-05-19 |
 | 026 | [model-routing-embabel](026-model-routing-embabel/) | 0/15 | 2026-05-19 |
 | 027 | [open-source-release](027-open-source-release/) | 0/0 (not atomized) | 2026-05-19 |
-| 028 | [daemon-runtime](028-daemon-runtime/) | 0/16 | 2026-11-01 |
 
 ## Done
 
