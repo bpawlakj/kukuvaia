@@ -5,6 +5,7 @@ import ai.kukuvaia.agent.daemon.DaemonScheduleGuard;
 import ai.kukuvaia.agent.daemon.NotificationSanitizer;
 import ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties;
 import ai.kukuvaia.agent.daemon.DaemonRuntime;
+import ai.kukuvaia.agent.daemon.JobRequest;
 import ai.kukuvaia.agent.daemon.DaemonTaskStore;
 import ai.kukuvaia.agent.daemon.exec.SpecialistExecutor;
 import ai.kukuvaia.security.ErrorSanitizer;
@@ -164,5 +165,52 @@ class DaemonTaskMigrationTest {
                 "INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
                         + "VALUES ('x', 'java', 't', 'cron', 'PENDING')"))
                 .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+    }
+
+    @Test
+    void pgNotify_realListenNotify_stormBecomesOneRun() throws Exception {
+        var dataSource = new DriverManagerDataSource(System.getenv("KUKUVAIA_TEST_DB_URL"), "postgres", "");
+        var jdbc = new JdbcTemplate(dataSource);
+        ai.kukuvaia.agent.daemon.exec.DaemonExecutor javaExecutor = new ai.kukuvaia.agent.daemon.exec.DaemonExecutor() {
+            @Override
+            public ai.kukuvaia.agent.daemon.exec.JobKind kind() {
+                return ai.kukuvaia.agent.daemon.exec.JobKind.JAVA;
+            }
+
+            @Override
+            public ai.kukuvaia.agent.daemon.exec.ExecutionOutcome execute(
+                    ai.kukuvaia.agent.daemon.exec.JobInvocation invocation, ai.kukuvaia.agent.daemon.exec.JobLimits limits) {
+                return ai.kukuvaia.agent.daemon.exec.ExecutionOutcome.ofText("x");
+            }
+        };
+        var registry = new ai.kukuvaia.agent.daemon.def.DaemonJobRegistry(List.of(javaExecutor), List.of(java.util.Map.entry(
+                "content.yaml", "name: content-sync\nkind: java\ntarget: sync\n"
+                        + "input: { fields: [item_id, batch_size] }\ntriggers: [ { pg-notify: content_changed } ]\n")));
+        var runtime = mock(DaemonRuntime.class);
+        when(runtime.submit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new DaemonRuntime.Submission(1, ai.kukuvaia.agent.daemon.DaemonTaskResult.DaemonTaskStatus.QUEUED, null));
+        var debouncer = new ai.kukuvaia.agent.daemon.PgNotifyDebouncer();
+        ReflectionTestUtils.setField(debouncer, "debounceSeconds", 1);
+        ReflectionTestUtils.setField(debouncer, "maxBatchSize", 100);
+        var listener = new ai.kukuvaia.agent.daemon.PgNotifyListener(dataSource, registry, runtime, debouncer,
+                new PayloadSanitizer(new ObjectMapper()), new DaemonProperties());
+
+        listener.start();
+        try {
+            Thread.sleep(1500); // LISTEN established
+            for (int i = 0; i < 50; i++) {
+                jdbc.queryForObject("SELECT pg_notify('content_changed', ?)", String.class,
+                        "{\"item_id\":\"i" + (i % 3) + "\"}");
+            }
+            var request = org.mockito.ArgumentCaptor.forClass(JobRequest.class);
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).untilAsserted(() ->
+                    org.mockito.Mockito.verify(runtime, org.mockito.Mockito.times(1))
+                            .submit(org.mockito.ArgumentMatchers.any(), request.capture()));
+            assertThat(request.getValue().fields()).containsEntry("batch_size", "50").containsEntry("item_id", "i0, i1, i2");
+            assertThat(request.getValue().triggerSource()).isEqualTo("pg-notify:content_changed");
+        } finally {
+            listener.stop();
+            debouncer.shutdown();
+        }
     }
 }

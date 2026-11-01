@@ -63,6 +63,7 @@ public class PgNotifyDebouncer {
         acc.add(payload);
     }
 
+    @jakarta.annotation.PreDestroy
     public void shutdown() {
         scheduler.shutdown();
         // Flush remaining batches
