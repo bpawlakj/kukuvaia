@@ -69,10 +69,12 @@ class NotificationSinksTest {
     void webhookSignatureVerifies() throws Exception {
         AtomicReference<byte[]> body = new AtomicReference<>();
         AtomicReference<String> signature = new AtomicReference<>();
+        AtomicReference<String> timestamp = new AtomicReference<>();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/hook", ex -> {
             body.set(ex.getRequestBody().readAllBytes());
             signature.set(ex.getRequestHeaders().getFirst(WebhookNotificationSink.SIGNATURE_HEADER));
+            timestamp.set(ex.getRequestHeaders().getFirst(WebhookNotificationSink.TIMESTAMP_HEADER));
             ex.sendResponseHeaders(204, -1);
             ex.close();
         });
@@ -84,14 +86,17 @@ class NotificationSinksTest {
 
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec("s3cret".getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        // Receiver-side verification: HMAC over "<timestamp>.<body>", timestamp recent.
+        mac.update((timestamp.get() + ".").getBytes(StandardCharsets.UTF_8));
         String expected = "sha256=" + HexFormat.of().formatHex(mac.doFinal(body.get()));
         assertThat(signature.get()).isEqualTo(expected);
+        assertThat(Math.abs(Instant.now().getEpochSecond() - Long.parseLong(timestamp.get()))).isLessThan(60);
         String json = new String(body.get(), StandardCharsets.UTF_8);
         assertThat(json).contains("\"taskId\":42").contains("Root cause").doesNotContain("SECRET-DETAIL");
     }
 
     @Test
-    @DisplayName("webhook sink: non-2xx is an error; plain http only to localhost; unconfigured = inactive")
+    @DisplayName("webhook sink: non-2xx is an error; plain http only to localhost; no URL or no secret = inactive, nothing sent")
     void webhookPolicies() throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/hook", ex -> { ex.sendResponseHeaders(500, -1); ex.close(); });
@@ -106,12 +111,19 @@ class NotificationSinksTest {
         var unconfigured = new WebhookNotificationSink("", "", 2, mapper);
         assertThat(unconfigured.isConfigured()).isFalse();
         unconfigured.send(payload); // no-op, no exception
+
+        java.util.concurrent.atomic.AtomicInteger hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/unsigned", ex -> { hits.incrementAndGet(); ex.sendResponseHeaders(204, -1); ex.close(); });
+        var noSecret = new WebhookNotificationSink("http://127.0.0.1:" + server.getAddress().getPort() + "/unsigned", "", 2, mapper);
+        assertThat(noSecret.isConfigured()).isFalse();
+        noSecret.send(payload);
+        assertThat(hits.get()).isZero();
     }
 
     @Test
     @DisplayName("notifier: failing and unknown sinks never throw; other sinks still receive; SKIPPED not notified")
-    void notifierIsolatesFailures() {
-        List<NotificationPayload> received = new ArrayList<>();
+    void notifierIsolatesFailures() throws Exception {
+        List<NotificationPayload> received = new java.util.concurrent.CopyOnWriteArrayList<>();
         NotificationSink boom = new NotificationSink() {
             public String name() { return "webhook"; }
             public void send(NotificationPayload p) { throw new IllegalStateException("down"); }
@@ -125,6 +137,9 @@ class NotificationSinksTest {
         notifier.notifyFinished(job(List.of("webhook", "nope", "log")), result(DaemonTaskStatus.COMPLETED, FULL_RESULT, null));
         notifier.notifyFinished(job(List.of("log")), result(DaemonTaskStatus.SKIPPED, null, "budget"));
 
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                .untilAsserted(() -> assertThat(received).hasSize(1));
+        Thread.sleep(200); // the SKIPPED run must not arrive late either
         assertThat(received).singleElement().extracting(NotificationPayload::taskId).isEqualTo(42L);
     }
 }

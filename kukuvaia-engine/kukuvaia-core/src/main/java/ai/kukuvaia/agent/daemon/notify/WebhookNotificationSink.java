@@ -18,18 +18,22 @@ import java.time.Duration;
 import java.util.HexFormat;
 
 /**
- * Posts the notification summary as JSON to a configured URL, signed like GitHub webhooks:
- * {@code X-Kukuvaia-Signature-256: sha256=<hex HMAC-SHA256(secret, body)>}.
+ * Posts the notification summary as JSON to a configured URL, signed with a shared secret:
+ * {@code X-Kukuvaia-Timestamp: <epoch seconds>} and
+ * {@code X-Kukuvaia-Signature-256: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>} — the
+ * receiver verifies the signature and rejects stale timestamps (replay protection).
  *
  * <p>URL and secret are server configuration ({@code kukuvaia.daemon.notifications.webhook.*}) — never
  * taken from a job definition or its input. Only {@code https} URLs are accepted (plain {@code http} only
- * for localhost). Unconfigured = the sink is inactive and jobs referencing it are logged as skipped.
+ * for localhost). Both URL and secret are required — without either the sink is inactive (fail closed:
+ * nothing is ever sent unsigned).
  */
 @Component
 public class WebhookNotificationSink implements NotificationSink {
 
     private static final Logger log = LoggerFactory.getLogger(WebhookNotificationSink.class);
     static final String SIGNATURE_HEADER = "X-Kukuvaia-Signature-256";
+    static final String TIMESTAMP_HEADER = "X-Kukuvaia-Timestamp";
 
     private final URI url;
     private final String secret;
@@ -47,7 +51,7 @@ public class WebhookNotificationSink implements NotificationSink {
         this.objectMapper = objectMapper;
         this.http = HttpClient.newBuilder().connectTimeout(this.timeout).followRedirects(HttpClient.Redirect.NEVER).build();
         if (this.url != null && this.secret.isBlank()) {
-            log.warn("Daemon webhook notifications configured without a secret — requests will be unsigned");
+            log.error("kukuvaia.daemon.notifications.webhook.url is set but the secret is empty — webhook sink inactive");
         }
     }
 
@@ -57,32 +61,34 @@ public class WebhookNotificationSink implements NotificationSink {
     }
 
     public boolean isConfigured() {
-        return url != null;
+        return url != null && !secret.isBlank();
     }
 
     @Override
     public void send(NotificationPayload payload) throws Exception {
-        if (url == null) {
-            log.debug("Webhook notification for task {} skipped: no kukuvaia.daemon.notifications.webhook.url", payload.taskId());
+        if (!isConfigured()) {
+            log.debug("Webhook notification for task {} skipped: webhook sink not configured (url + secret)", payload.taskId());
             return;
         }
         byte[] body = objectMapper.writeValueAsBytes(payload);
-        HttpRequest.Builder request = HttpRequest.newBuilder(url)
+        String timestamp = Long.toString(java.time.Instant.now().getEpochSecond());
+        HttpRequest request = HttpRequest.newBuilder(url)
                 .timeout(timeout)
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
-        if (!secret.isBlank()) {
-            request.header(SIGNATURE_HEADER, "sha256=" + sign(secret, body));
-        }
-        HttpResponse<Void> response = http.send(request.build(), HttpResponse.BodyHandlers.discarding());
+                .header(TIMESTAMP_HEADER, timestamp)
+                .header(SIGNATURE_HEADER, "sha256=" + sign(secret, timestamp, body))
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .build();
+        HttpResponse<Void> response = http.send(request, HttpResponse.BodyHandlers.discarding());
         if (response.statusCode() >= 300) {
             throw new IllegalStateException("webhook notification returned HTTP " + response.statusCode());
         }
     }
 
-    static String sign(String secret, byte[] body) throws Exception {
+    static String sign(String secret, String timestamp, byte[] body) throws Exception {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        mac.update((timestamp + ".").getBytes(StandardCharsets.UTF_8));
         return HexFormat.of().formatHex(mac.doFinal(body));
     }
 

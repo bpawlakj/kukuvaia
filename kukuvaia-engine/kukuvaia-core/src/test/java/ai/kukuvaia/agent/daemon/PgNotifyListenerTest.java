@@ -55,6 +55,13 @@ class PgNotifyListenerTest {
                         prompt: "items {{fields.item_id}} ({{fields.batch_size}})"
                         triggers: [ { pg-notify: content_changed } ]
                         """),
+                Map.entry("ci.yaml", """
+                        name: ci-events
+                        kind: java
+                        target: t
+                        input: { fields: [item_id, status], match: { status: [failed, error] } }
+                        triggers: [ { pg-notify: ci_events } ]
+                        """),
                 Map.entry("text.yaml", """
                         name: text-job
                         kind: java
@@ -75,6 +82,7 @@ class PgNotifyListenerTest {
         var d = new PgNotifyDebouncer();
         ReflectionTestUtils.setField(d, "debounceSeconds", seconds);
         ReflectionTestUtils.setField(d, "maxBatchSize", 100);
+        ReflectionTestUtils.setField(d, "maxWaitSeconds", 30);
         return d;
     }
 
@@ -137,6 +145,113 @@ class PgNotifyListenerTest {
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> verify(runtime, times(1)).submit(any(), request.capture()));
         assertThat(request.getValue().fields()).containsEntry("batch_size", "50");
         debouncer.shutdown();
+    }
+
+    @Test
+    @DisplayName("D3 review #7: input.match is evaluated per event — mixed batch matches, non-matching events not aggregated")
+    void matchPerEvent() {
+        when(runtime.submit(any(), any())).thenReturn(new DaemonRuntime.Submission(1, DaemonTaskStatus.QUEUED, null));
+        var l = listener(registry(), debouncer(5));
+
+        l.onBatch("ci_events", List.of(
+                "{\"item_id\":\"a\",\"status\":\"failed\"}",
+                "{\"item_id\":\"b\",\"status\":\"passed\"}",
+                "{\"item_id\":\"c\",\"status\":\"error\"}"));
+
+        ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
+        verify(runtime).submit(any(), request.capture());
+        assertThat(request.getValue().fields()).containsEntry("item_id", "a, c").containsEntry("status", "failed, error");
+    }
+
+    @Test
+    @DisplayName("D3 review #5: 250 notifications in one window → exactly one run, batch_size 250, buffer bounded")
+    void bigStormOneRun() throws Exception {
+        when(runtime.submit(any(), any())).thenReturn(new DaemonRuntime.Submission(1, DaemonTaskStatus.QUEUED, null));
+        var debouncer = debouncer(1);
+        var l = listener(registry(), debouncer);
+        debouncer.register("content_changed", (PgNotifyDebouncer.BatchHandler) (batch, total) -> {
+            assertThat(batch).hasSizeLessThanOrEqualTo(100);
+            l.onBatch("content_changed", batch, total);
+        });
+
+        for (int i = 0; i < 250; i++) {
+            debouncer.onNotification("content_changed", "{\"item_id\":\"i" + (i % 3) + "\",\"kind\":\"book\"}");
+        }
+
+        ArgumentCaptor<JobRequest> request = ArgumentCaptor.forClass(JobRequest.class);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> verify(runtime, times(1)).submit(any(), request.capture()));
+        Thread.sleep(1500);
+        verify(runtime, times(1)).submit(any(), any());
+        assertThat(request.getValue().fields()).containsEntry("batch_size", "100"); // filtered job: matching buffered events
+        debouncer.shutdown();
+    }
+
+    @Test
+    @DisplayName("D3 review #5: unfiltered job sees the full event count; a steady trickle is flushed by max-wait")
+    void trickleFlushedByMaxWait() {
+        when(runtime.submit(any(), any())).thenReturn(new DaemonRuntime.Submission(1, DaemonTaskStatus.QUEUED, null));
+        var debouncer = debouncer(1);
+        ReflectionTestUtils.setField(debouncer, "maxWaitSeconds", 2);
+        var l = listener(registry(), debouncer);
+        debouncer.register("plain_channel", (PgNotifyDebouncer.BatchHandler) (batch, total) -> l.onBatch("plain_channel", batch, total));
+
+        long start = System.nanoTime();
+        // one event every 400 ms (< 1 s window) would postpone a pure debounce forever
+        while (Duration.ofNanos(System.nanoTime() - start).toMillis() < 3500) {
+            debouncer.onNotification("plain_channel", "tick");
+            try { Thread.sleep(400); } catch (InterruptedException e) { throw new RuntimeException(e); }
+            if (org.mockito.Mockito.mockingDetails(runtime).getInvocations().stream()
+                    .anyMatch(i -> i.getMethod().getName().equals("submit"))) break;
+        }
+
+        verify(runtime, org.mockito.Mockito.atLeastOnce()).submit(any(), any());
+        assertThat(Duration.ofNanos(System.nanoTime() - start).toMillis()).isLessThan(3500);
+        debouncer.shutdown();
+    }
+
+    @Test
+    @DisplayName("max-wait 0 (misconfigured) never disables debouncing")
+    void zeroMaxWaitStillDebounces() {
+        when(runtime.submit(any(), any())).thenReturn(new DaemonRuntime.Submission(1, DaemonTaskStatus.QUEUED, null));
+        var debouncer = debouncer(1);
+        ReflectionTestUtils.setField(debouncer, "maxWaitSeconds", 0);
+        var l = listener(registry(), debouncer);
+        debouncer.register("content_changed", (PgNotifyDebouncer.BatchHandler) (batch, total) -> l.onBatch("content_changed", batch, total));
+
+        for (int i = 0; i < 20; i++) debouncer.onNotification("content_changed", "{\"item_id\":\"x\",\"kind\":\"book\"}");
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> verify(runtime, times(1)).submit(any(), any()));
+        debouncer.shutdown();
+    }
+
+    @Test
+    @DisplayName("D3 review #2: a RuntimeException in the loop does not kill the listener — it reconnects and keeps listening")
+    void survivesRuntimeException() throws Exception {
+        var dataSource = mock(javax.sql.DataSource.class);
+        var connection = mock(java.sql.Connection.class);
+        var pg = mock(org.postgresql.PGConnection.class);
+        var notification = mock(org.postgresql.PGNotification.class);
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(connection.unwrap(org.postgresql.PGConnection.class)).thenReturn(pg);
+        when(connection.createStatement()).thenReturn(mock(java.sql.Statement.class));
+        when(notification.getName()).thenReturn("content_changed");
+        when(notification.getParameter()).thenReturn("{}");
+        when(pg.getNotifications(org.mockito.ArgumentMatchers.anyInt())).thenReturn(new org.postgresql.PGNotification[]{notification});
+        var debouncer = mock(PgNotifyDebouncer.class);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        org.mockito.Mockito.doAnswer(inv -> {
+            if (calls.incrementAndGet() == 1) throw new IllegalStateException("boom");
+            return null;
+        }).when(debouncer).onNotification(any(), any());
+        var l = new PgNotifyListener(dataSource, registry(), runtime, debouncer, sanitizer, new DaemonProperties());
+
+        l.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> calls.get() >= 3);
+            verify(dataSource, times(2)).getConnection();
+        } finally {
+            l.stop();
+        }
     }
 
     @Test

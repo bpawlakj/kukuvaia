@@ -32,6 +32,12 @@ kukuvaia:
     # /api/daemon manual runs and full results are refused while security.dev-mode=true (API auth is
     # bypassed then). Set to true only for local use.
     api-allow-in-dev-mode: ${KUKUVAIA_DAEMON_API_ALLOW_IN_DEV_MODE:false}
+    # PG NOTIFY triggers: one batch per channel after a quiet window, at most max-wait after the first
+    # event; at most max-batch-size payloads are kept (overflow is counted). The LISTEN connection is
+    # borrowed from the pool for the app's lifetime — keep hikari maximum-pool-size >= 2.
+    notify-debounce-seconds: 5
+    notify-max-wait-seconds: 30
+    notify-max-batch-size: 100
     notifications:
       # Jobs list sinks in `notify:` (log | webhook). Sinks only receive the sanitized summary;
       # full results stay behind the authenticated /api/daemon/tasks/{id}.

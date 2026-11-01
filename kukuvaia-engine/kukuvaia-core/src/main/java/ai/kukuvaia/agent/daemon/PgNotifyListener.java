@@ -16,6 +16,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -32,6 +33,9 @@ import java.util.regex.Pattern;
  * {@code input.fields} are taken (JSON payloads via {@link PayloadSanitizer#extractFields}; a plain-text
  * payload only if the job declares a {@code payload} field), values of all events are de-duplicated
  * and joined, and {@code batch_size} is provided if declared. Raw payloads never reach a prompt.
+ *
+ * <p>The listening connection is borrowed from the application pool for the listener's lifetime —
+ * keep {@code spring.datasource.hikari.maximum-pool-size} at 2 or more when pg-notify jobs exist.
  */
 @Component
 public class PgNotifyListener implements SmartLifecycle {
@@ -40,6 +44,7 @@ public class PgNotifyListener implements SmartLifecycle {
     /** Same rule as the job parser; LISTEN takes an identifier, not a bind parameter. */
     private static final Pattern CHANNEL = Pattern.compile("[a-z_][a-z0-9_]{0,62}");
     private static final int MAX_FIELD_LENGTH = 500;
+    private static final Duration STABLE_CONNECTION = Duration.ofSeconds(60);
 
     private final DataSource dataSource;
     private final DaemonJobRegistry registry;
@@ -70,7 +75,8 @@ public class PgNotifyListener implements SmartLifecycle {
             log.info("PG NOTIFY listener idle ({})", channels.isEmpty() ? "no pg-notify triggers" : "daemon disabled");
             return;
         }
-        channels.keySet().forEach(ch -> debouncer.register(ch, batch -> onBatch(ch, batch)));
+        channels.keySet().forEach(ch -> debouncer.register(ch,
+                (PgNotifyDebouncer.BatchHandler) (batch, total) -> onBatch(ch, batch, total)));
         listenerThread = Thread.ofPlatform().daemon().name("kukuvaia-pg-notify").start(() -> listenLoop(channels.keySet()));
         log.info("PG NOTIFY listener started for channels {}", channels.keySet());
     }
@@ -91,6 +97,7 @@ public class PgNotifyListener implements SmartLifecycle {
     private void listenLoop(Set<String> channels) {
         long backoffMs = 1000;
         while (running) {
+            long connectedAt = System.nanoTime();
             try (Connection connection = dataSource.getConnection()) {
                 PGConnection pg = connection.unwrap(PGConnection.class);
                 try (Statement statement = connection.createStatement()) {
@@ -99,7 +106,7 @@ public class PgNotifyListener implements SmartLifecycle {
                         statement.execute("LISTEN \"" + channel + "\"");
                     }
                 }
-                backoffMs = 1000;
+                connectedAt = System.nanoTime();
                 while (running) {
                     PGNotification[] notifications = pg.getNotifications(1000);
                     if (notifications == null) continue;
@@ -107,9 +114,17 @@ public class PgNotifyListener implements SmartLifecycle {
                         debouncer.onNotification(n.getName(), n.getParameter());
                     }
                 }
-            } catch (SQLException e) {
+            } catch (SQLException | RuntimeException e) {
                 if (!running) break;
-                log.warn("PG NOTIFY connection lost ({}); reconnecting in {} ms", e.getMessage(), backoffMs);
+                // Reset the backoff only after a stable connection — a flapping link keeps backing off.
+                if (Duration.ofNanos(System.nanoTime() - connectedAt).compareTo(STABLE_CONNECTION) > 0) {
+                    backoffMs = 1000;
+                }
+                if (e instanceof SQLException) {
+                    log.warn("PG NOTIFY connection lost ({}); reconnecting in {} ms", e.getMessage(), backoffMs);
+                } else {
+                    log.error("PG NOTIFY listener error; restarting in {} ms", backoffMs, e);
+                }
                 try {
                     Thread.sleep(backoffMs);
                 } catch (InterruptedException ie) {
@@ -123,10 +138,17 @@ public class PgNotifyListener implements SmartLifecycle {
 
     /** Turn one debounced batch into one run per job listening on the channel. */
     void onBatch(String channel, List<String> payloads) {
+        onBatch(channel, payloads, payloads.size());
+    }
+
+    /**
+     * @param totalEvents events received in the window, including overflow beyond the buffered payloads
+     */
+    void onBatch(String channel, List<String> payloads, int totalEvents) {
         for (DaemonJobDefinition job : registry.byPgNotifyChannel().getOrDefault(channel, List.of())) {
-            Map<String, String> fields = fieldsFor(job, payloads);
-            if (!job.matches(fields)) {
-                log.debug("PG NOTIFY batch on '{}' does not match job '{}' input filter", channel, job.name());
+            Map<String, String> fields = fieldsFor(job, payloads, totalEvents);
+            if (fields == null) {
+                log.debug("PG NOTIFY batch on '{}' has no event matching job '{}' input filter", channel, job.name());
                 continue;
             }
             var submission = runtime.submit(job, new JobRequest(PromptRenderer.render(job.prompt(), fields), fields,
@@ -136,25 +158,39 @@ public class PgNotifyListener implements SmartLifecycle {
         }
     }
 
-    Map<String, String> fieldsFor(DaemonJobDefinition job, List<String> payloads) {
+    /**
+     * Aggregate the declared fields of the events that pass the job's {@code input.match} filter
+     * (evaluated per event). Returns {@code null} when no event matches.
+     */
+    Map<String, String> fieldsFor(DaemonJobDefinition job, List<String> payloads, int totalEvents) {
         Set<String> declared = Set.copyOf(job.inputFields());
         Map<String, LinkedHashSet<String>> values = new LinkedHashMap<>();
+        int matched = 0;
         for (String payload : payloads) {
             if (payload == null || payload.isBlank()) continue;
+            Map<String, String> event;
             if (payload.trim().startsWith("{")) {
-                sanitizer.extractFields(payload, declared)
-                        .forEach((k, v) -> values.computeIfAbsent(k, x -> new LinkedHashSet<>()).add(v));
+                event = sanitizer.extractFields(payload, declared);
             } else if (declared.contains("payload")) {
                 String value = sanitizer.sanitizeValue(payload);
-                if (value != null) values.computeIfAbsent("payload", x -> new LinkedHashSet<>()).add(value);
+                event = value == null ? Map.of() : Map.of("payload", value);
+            } else {
+                event = Map.of();
             }
+            if (!job.matches(event)) continue;
+            matched++;
+            event.forEach((k, v) -> values.computeIfAbsent(k, x -> new LinkedHashSet<>()).add(v));
         }
+        if (matched == 0) return null;
+        // Overflow events (beyond the buffered payloads) were not inspected; they only count when
+        // the job has no filter — otherwise batch_size is the number of matching buffered events.
+        int batchSize = job.inputMatch().isEmpty() ? Math.max(matched, totalEvents) : matched;
         Map<String, String> fields = new LinkedHashMap<>();
         values.forEach((k, v) -> {
             String joined = String.join(", ", v);
             fields.put(k, joined.length() > MAX_FIELD_LENGTH ? joined.substring(0, MAX_FIELD_LENGTH) + "…" : joined);
         });
-        if (declared.contains("batch_size")) fields.put("batch_size", Integer.toString(payloads.size()));
+        if (declared.contains("batch_size")) fields.put("batch_size", Integer.toString(batchSize));
         return fields;
     }
 }

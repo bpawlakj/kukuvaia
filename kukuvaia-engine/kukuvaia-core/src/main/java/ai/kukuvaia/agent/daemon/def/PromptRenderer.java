@@ -9,7 +9,8 @@ import java.util.regex.Pattern;
 /**
  * Renders a job prompt. The only placeholder is {@code {{fields.<name>}}} and only declared input
  * fields are substituted — a raw trigger payload can never be interpolated (AGENTS.md "never
- * interpolate raw ${event.payload}"). Field values are expected to be sanitized already.
+ * interpolate raw ${event.payload}"). Field values are expected to be sanitized already and are
+ * additionally flattened to one line (see {@link #flatten}).
  */
 public final class PromptRenderer {
 
@@ -38,10 +39,19 @@ public final class PromptRenderer {
         Matcher m = PLACEHOLDER.matcher(template);
         StringBuilder out = new StringBuilder();
         while (m.find()) {
-            String value = fields.getOrDefault(m.group(1), "");
+            String value = flatten(fields.getOrDefault(m.group(1), ""));
             m.appendReplacement(out, Matcher.quoteReplacement(value));
         }
         m.appendTail(out);
         return out.toString();
+    }
+
+    /**
+     * Untrusted values are rendered on one line and without angle brackets, so they cannot forge prompt
+     * structure (new bullet lines, headings) or close a {@code <event_data>} fence.
+     */
+    static String flatten(String value) {
+        if (value == null) return "";
+        return value.replaceAll("\\s+", " ").replace('<', '‹').replace('>', '›').strip();
     }
 }

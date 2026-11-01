@@ -84,7 +84,14 @@ public class WebhookAuthFilter extends OncePerRequestFilter {
 
         // Bearer token first (simpler) — constant-time comparison.
         if (isConfigured(bearerToken) && bearerMatches(request.getHeader("Authorization"))) {
-            filterChain.doFilter(request, response);
+            // Bounded like the HMAC path — the controller must never read an unbounded body.
+            byte[] body = readBodyBounded(request);
+            if (body == null) {
+                log.warn("Webhook payload from {} exceeds {} bytes — rejected", request.getRemoteAddr(), MAX_BODY_BYTES);
+                response.sendError(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, "Webhook payload too large");
+                return;
+            }
+            filterChain.doFilter(new CachedBodyRequest(request, body), response);
             return;
         }
 

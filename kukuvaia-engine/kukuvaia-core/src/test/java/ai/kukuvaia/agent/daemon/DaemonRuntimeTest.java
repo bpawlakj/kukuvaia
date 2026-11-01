@@ -230,7 +230,7 @@ class DaemonRuntimeTest {
 
         assertThat(r.status()).isEqualTo(DaemonTaskStatus.COMPLETED);
         assertThat(store.status.get(r.taskId())).isEqualTo("COMPLETED");
-        assertThat(seen).containsExactly("COMPLETED");
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> assertThat(seen).containsExactly("COMPLETED"));
     }
 
     @Test
