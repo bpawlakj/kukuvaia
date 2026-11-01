@@ -39,6 +39,20 @@ class SubAgentFactoryCallTest {
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
     private final LlmProviderService providerService = mock(LlmProviderService.class);
     private SubAgentFactory factory;
+    private final java.util.concurrent.atomic.AtomicInteger echoInvocations = new java.util.concurrent.atomic.AtomicInteger();
+    private final ToolCallback echoTool = new ToolCallback() {
+        @Override
+        public org.springframework.ai.tool.definition.ToolDefinition getToolDefinition() {
+            return org.springframework.ai.tool.definition.ToolDefinition.builder()
+                    .name("echo").description("echo").inputSchema("{\"type\":\"object\"}").build();
+        }
+
+        @Override
+        public String call(String toolInput) {
+            echoInvocations.incrementAndGet();
+            return "echoed";
+        }
+    };
 
     /** ChatModel stub whose behaviour each test supplies. */
     private static ChatModel model(Function<Prompt, ChatResponse> behaviour) {
@@ -61,9 +75,13 @@ class SubAgentFactoryCallTest {
         when(specLoader.loadAll()).thenReturn(Map.of(
                 // name, description, provider, tier, prompt, tools, model, maxTokens, maxToolRounds, temperature, timeoutSeconds
                 "analyst", new SubAgentSpec("analyst", "test", null, null, "You analyse.",
-                        List.of(), null, 1024, 5, 0.1, 2)));
+                        List.of(), null, 1024, 5, 0.1, 2),
+                "looper", new SubAgentSpec("looper", "calls tools", null, null, "You use tools.",
+                        List.of("echo"), null, 1024, 2, 0.1, 10)));
         ToolRegistryConfig tools = mock(ToolRegistryConfig.class);
-        when(tools.resolveAll(anyCollection())).thenReturn(new ToolCallback[0]);
+        when(tools.resolveAll(anyCollection())).thenAnswer(inv ->
+                ((java.util.Collection<?>) inv.getArgument(0)).contains("echo")
+                        ? new ToolCallback[]{echoTool} : new ToolCallback[0]);
         factory = new SubAgentFactory(providerService, new SubAgentGuard(3),
                 new ToolResultSanitizingAdvisor(), new ProviderAuditLog(meters), tools, specLoader, meters);
     }
@@ -156,6 +174,45 @@ class SubAgentFactoryCallTest {
                 .as("timed-out call must be interrupted, not left running")
                 .isTrue();
         assertThat(finishedNormally).isFalse();
+    }
+
+    @Test
+    @DisplayName("max_tool_rounds: the (N+1)th tool call is refused and the model still answers")
+    void executeForResult_toolBudgetEnforced() {
+        var modelCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<String> toolResultsSeen = new java.util.concurrent.CopyOnWriteArrayList<>();
+        ChatModel toolHungry = new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                prompt.getInstructions().stream()
+                        .filter(m -> m instanceof org.springframework.ai.chat.messages.ToolResponseMessage)
+                        .reduce((a, b) -> b)
+                        .ifPresent(m -> ((org.springframework.ai.chat.messages.ToolResponseMessage) m)
+                                .getResponses().forEach(r -> toolResultsSeen.add(r.responseData())));
+                int n = modelCalls.incrementAndGet();
+                if (n <= 4) { // asks for a tool 4 times, budget is 2
+                    var call = new AssistantMessage.ToolCall("call-" + n, "function", "echo", "{}");
+                    return new ChatResponse(List.of(new Generation(
+                            AssistantMessage.builder().content("").toolCalls(List.of(call)).build())));
+                }
+                return answer("final answer", 5, 5);
+            }
+
+            @Override
+            public org.springframework.ai.chat.prompt.ChatOptions getOptions() {
+                // Production models (TransportChatModelAdapter) expose OpenAiChatOptions, which are
+                // ToolCallingChatOptions — ChatClient only forwards tools in that case.
+                return org.springframework.ai.openai.OpenAiChatOptions.builder().build();
+            }
+        };
+        when(providerService.resolve(any(), any())).thenReturn(toolHungry);
+
+        SubAgentResult result = factory.executeForResult("task", "looper", ExecutionContext.DAEMON, null, 0, null);
+
+        assertThat(result.content()).isEqualTo("final answer");
+        assertThat(echoInvocations.get()).as("real tool invoked only max_tool_rounds times").isEqualTo(2);
+        assertThat(toolResultsSeen).containsExactly("echoed", "echoed",
+                ToolRoundLimiter.EXHAUSTED_RESULT, ToolRoundLimiter.EXHAUSTED_RESULT);
     }
 
     @Test

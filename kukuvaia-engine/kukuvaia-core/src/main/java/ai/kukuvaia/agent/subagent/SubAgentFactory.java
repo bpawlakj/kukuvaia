@@ -261,6 +261,9 @@ public class SubAgentFactory {
         log.info("Creating sub-agent: specialist={}, provider={}, context={}, tools={}, depth={}",
                 specialistType, resolvedProvider, context, safeTools.size(), currentDepth);
 
+        // Security (DoS): every tool of this call shares the specialist's max_tool_rounds budget.
+        var toolLimiter = new ToolRoundLimiter(specialistType, spec.maxToolRounds());
+
         // Isolated ChatClient. ToolCallingAdvisor is auto-registered by Spring AI 2.x.
         ChatClient subAgent = ChatClient.builder(chatModel)
                 .defaultSystem(safePrompt)
@@ -268,7 +271,7 @@ public class SubAgentFactory {
                         providerAuditLog,         // Provider/context/specialist + token metrics (finding #9)
                         toolResultAdvisor         // Anti-prompt-injection in tool results
                 )
-                .defaultTools(toolRegistry.resolveAll(safeTools))
+                .defaultTools((Object[]) toolLimiter.wrap(toolRegistry.resolveAll(safeTools)))
                 .build();
 
         long timeoutSeconds = spec.timeoutSeconds() > 0
