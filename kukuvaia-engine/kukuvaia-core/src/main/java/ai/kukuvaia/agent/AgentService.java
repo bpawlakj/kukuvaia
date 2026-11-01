@@ -1,6 +1,7 @@
 package ai.kukuvaia.agent;
 
 import ai.kukuvaia.advisors.ModelRoutingAdvisor;
+import ai.kukuvaia.config.ToolRegistryConfig;
 import ai.kukuvaia.memory.extraction.MemoryExtractionService;
 import ai.kukuvaia.memory.repository.SessionRepository;
 import ai.kukuvaia.output.MetadataBlock;
@@ -9,6 +10,8 @@ import ai.kukuvaia.output.SessionOutputSink;
 import ai.kukuvaia.output.SpanEventEmitter;
 import ai.kukuvaia.output.TextBlock;
 import ai.kukuvaia.tools.PlanningTools;
+import ai.kukuvaia.tools.DelegationTools;
+import ai.kukuvaia.security.ErrorSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -17,6 +20,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -43,6 +48,8 @@ public class AgentService {
     private final SessionOutputSink outputSink;
     private final SpanEventEmitter spanEmitter;
     private final PlanningModeService planningModeService;
+    private final ToolRegistryConfig toolRegistry;
+    private final ErrorSanitizer errorSanitizer;
 
     @Value("${kukuvaia.chat.timeout-seconds:180}")
     private int chatTimeoutSeconds;
@@ -54,7 +61,9 @@ public class AgentService {
                         @Qualifier("memoryExtractionExecutor") Executor extractionExecutor,
                         SessionOutputSink outputSink,
                         SpanEventEmitter spanEmitter,
-                        PlanningModeService planningModeService) {
+                        PlanningModeService planningModeService,
+                        ToolRegistryConfig toolRegistry,
+                        ErrorSanitizer errorSanitizer) {
         this.chatClient = chatClient;
         this.personaService = personaService;
         this.extractionService = extractionService;
@@ -63,6 +72,8 @@ public class AgentService {
         this.outputSink = outputSink;
         this.spanEmitter = spanEmitter;
         this.planningModeService = planningModeService;
+        this.toolRegistry = toolRegistry;
+        this.errorSanitizer = errorSanitizer;
     }
 
     /**
@@ -75,13 +86,14 @@ public class AgentService {
         log.info("Chat request: sessionId={}, messageLength={}", sessionId, message.length());
 
         Flux<OutputBlock> stream = outputSink.streamFor(sessionId);
+        PersonaSpec persona = personaService.getActivePersona(sessionId);
         // Dispatch the chat work on a worker thread so the HTTP subscriber
         // attaches to the sink before emissions and completion happen.
-        CompletableFuture.runAsync(() -> runChat(sessionId, message));
+        CompletableFuture.runAsync(() -> runChat(sessionId, message, persona));
         return stream;
     }
 
-    private void runChat(String sessionId, String message) {
+    private void runChat(String sessionId, String message, PersonaSpec persona) {
         long turnStart = System.currentTimeMillis();
         log.info("[runChat] ===== sessionId={} turn start — message length={} =====",
                 sessionId, message.length());
@@ -98,7 +110,6 @@ public class AgentService {
         String status = "success";
         try {
             sessionRepository.ensureExists(sessionId, USER_ID);
-            PersonaSpec persona = personaService.getActivePersona(sessionId);
             log.info("[runChat] sessionId={} persona active: name={} (systemPrompt {} chars)",
                     sessionId, persona.name(),
                     persona.systemPrompt() != null ? persona.systemPrompt().length() : 0);
@@ -108,7 +119,7 @@ public class AgentService {
             var chatResponse = CompletableFuture.supplyAsync(() -> {
                 PlanningTools.setContext(sessionId, USER_ID);
                 try {
-                    return chatClient.prompt()
+                    return personaPrompt(persona)
                             .system(persona.systemPrompt())
                             .user(message)
                             .advisors(spec -> spec
@@ -174,7 +185,7 @@ public class AgentService {
     public String chat(String sessionId, String message) {
         PersonaSpec persona = personaService.getActivePersona(sessionId);
 
-        return chatClient.prompt()
+        return personaPrompt(persona)
                 .system(persona.systemPrompt())
                 .user(message)
                 .advisors(spec -> spec
@@ -182,6 +193,14 @@ public class AgentService {
                         .param("kukuvaia.userId", USER_ID))
                 .call()
                 .content();
+    }
+
+    private ChatClient.ChatClientRequestSpec personaPrompt(PersonaSpec persona) {
+        Set<String> allowedTools = Set.copyOf(persona.toolFilter().isEmpty()
+                ? toolRegistry.toolNames() : persona.toolFilter());
+        return chatClient.prompt()
+                .tools((Object[]) toolRegistry.resolveAll(allowedTools))
+                .toolContext(Map.of(DelegationTools.PERSONA_TOOLS_CONTEXT_KEY, allowedTools));
     }
 
     /**
@@ -407,9 +426,6 @@ public class AgentService {
         if (msg.contains("429")) {
             return "Rate limited by LLM provider. Wait a moment and try again.";
         }
-        if (msg.length() > 200) {
-            msg = msg.substring(0, 200) + "...";
-        }
-        return "LLM error: " + msg;
+        return "LLM error: " + errorSanitizer.sanitize(msg);
     }
 }

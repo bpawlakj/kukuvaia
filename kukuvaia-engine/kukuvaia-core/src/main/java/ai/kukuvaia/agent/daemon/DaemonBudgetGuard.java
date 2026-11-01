@@ -68,7 +68,7 @@ public class DaemonBudgetGuard {
      */
     public void recordUsage(long taskId, int tokenCount) {
         jdbc.update(
-                "UPDATE daemon_tasks SET token_usage = ? WHERE id = ?",
+                "UPDATE kukuvaia_agent.daemon_tasks SET token_usage = ? WHERE id = ?",
                 tokenCount, taskId);
 
         int todayTotal = getTodayTokenUsage();
@@ -85,7 +85,7 @@ public class DaemonBudgetGuard {
 
     private int getTodayTokenUsage() {
         Integer usage = jdbc.queryForObject(
-                "SELECT COALESCE(SUM(token_usage), 0) FROM daemon_tasks " +
+                "SELECT COALESCE(SUM(token_usage), 0) FROM kukuvaia_agent.daemon_tasks " +
                 "WHERE created_at >= ?::date AND token_usage IS NOT NULL",
                 Integer.class,
                 LocalDate.now());

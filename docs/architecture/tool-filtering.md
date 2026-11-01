@@ -1,5 +1,23 @@
 # Tool Filtering — Persona ↔ Gateway Tool Visibility
 
+## Current Java Runtime Enforcement
+
+`PersonaSpec` accepts `tools`, `tool_filter`, and `toolFilter` as whitelist aliases.
+An empty persona filter preserves unrestricted access to registered tools. A nonempty
+filter permits only explicitly named registered callbacks, including internal and delegation
+tools; missing names never cause a fallback to all tools. `/help` lists this effective scope.
+
+`AgentService` supplies callbacks separately for each synchronous or streamed request.
+The interactive `ChatClient` has no default callbacks because Spring AI adds request tools
+to defaults. The resolved parent scope is carried in server-owned `ToolContext`, excluded
+from the model's input schema. Both delegation paths require that scope and pass it to
+`SubAgentGuard`, which intersects specialist tools with the parent scope and removes all
+delegation callbacks. An explicitly empty resolved parent scope grants no specialist tools;
+`null` remains the factory's unrestricted mode for callers without a persona.
+
+The following sections describe gateway compatibility concerns and possible extensions;
+they do not replace the runtime whitelist enforcement above.
+
 ## Problem
 
 Personas define which MCP Gateway tools are visible to the agent via `tool_filter` in YAML config. This creates a fragile coupling between persona config (agent side) and tool names (gateway side).

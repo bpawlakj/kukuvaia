@@ -34,12 +34,12 @@ class SubAgentGuardTest {
 
     @Test
     void filterTools_removesDelegateParallel() {
-        var tools = List.of("tool_alpha", "delegateParallel", "delegate_parallel");
+        var tools = List.of("tool_alpha", "delegateParallel", "delegate_parallel", "delegate_to_workers");
         Set<String> result = guard.filterTools(tools, null);
 
         assertThat(result)
                 .contains("tool_alpha")
-                .doesNotContain("delegateParallel", "delegate_parallel");
+                .doesNotContain("delegateParallel", "delegate_parallel", "delegate_to_workers");
     }
 
     @Test
@@ -83,11 +83,11 @@ class SubAgentGuardTest {
     }
 
     @Test
-    void filterTools_personaEmptyAllowsAll() {
+    void filterTools_emptyParentScopeAllowsNoTools() {
         var tools = List.of("tool_alpha", "tool_beta");
         Set<String> result = guard.filterTools(tools, List.of());
 
-        assertThat(result).containsExactlyInAnyOrder("tool_alpha", "tool_beta");
+        assertThat(result).isEmpty();
     }
 
     @Test

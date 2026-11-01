@@ -31,6 +31,7 @@ public class SubAgentGuard {
     private static final Set<String> BLOCKED_TOOLS = Set.of(
             "delegate_to_specialist",
             "delegateToSpecialist",
+            "delegate_to_workers",
             "delegate_parallel",
             "delegateParallel"
     );
@@ -65,7 +66,7 @@ public class SubAgentGuard {
         }
 
         // Intersect with persona's allowed tools (if persona defines a filter)
-        if (personaTools != null && !personaTools.isEmpty()) {
+        if (personaTools != null) {
             var personaSet = new LinkedHashSet<>(personaTools);
             personaSet.removeAll(BLOCKED_TOOLS); // Persona filter also can't include these
             var escalated = new LinkedHashSet<>(filtered);

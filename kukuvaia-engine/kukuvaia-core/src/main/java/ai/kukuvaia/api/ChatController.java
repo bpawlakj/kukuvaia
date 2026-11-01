@@ -4,6 +4,7 @@ import ai.kukuvaia.agent.CommandRouter;
 import ai.kukuvaia.agent.PersonaService;
 import ai.kukuvaia.output.OutputBlock;
 import ai.kukuvaia.output.TextBlock;
+import ai.kukuvaia.security.ErrorSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -34,13 +35,16 @@ public class ChatController {
 
     private final CommandRouter commandRouter;
     private final PersonaService personaService;
+    private final ErrorSanitizer errorSanitizer;
 
     @Value("${kukuvaia.chat.timeout-seconds:180}")
     private int chatTimeoutSeconds;
 
-    public ChatController(CommandRouter commandRouter, PersonaService personaService) {
+    public ChatController(CommandRouter commandRouter, PersonaService personaService,
+                          ErrorSanitizer errorSanitizer) {
         this.commandRouter = commandRouter;
         this.personaService = personaService;
+        this.errorSanitizer = errorSanitizer;
     }
 
     @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -49,7 +53,7 @@ public class ChatController {
             personaService.applyIfPresent(request.sessionId(), request.persona());
         } catch (IllegalArgumentException e) {
             log.warn("Rejecting chat: unknown persona '{}' for session {}", request.persona(), request.sessionId());
-            return Flux.just(new TextBlock("Unknown persona: " + request.persona(), "error"));
+            return Flux.just(new TextBlock(errorSanitizer.sanitize("Unknown persona: " + request.persona()), "error"));
         }
 
         // Backstop sits 30s past the inner AgentService timeout so the inner timeout's terminal
@@ -58,11 +62,21 @@ public class ChatController {
         // would expire, the catch block would start emitting, and this outer timeout would still
         // win before the terminal signal reached the sink, leaving the CLI with a bare
         // 'sinkManyEmitterProcessor timeout' instead of the proper error TextBlock.
-        return commandRouter.route(request.message(), request.sessionId())
+        // Route eagerly so AgentService snapshots this request's persona before a later
+        // request can rebind the session while the HTTP subscriber is still attaching.
+        Flux<OutputBlock> routed;
+        try {
+            routed = commandRouter.route(request.message(), request.sessionId());
+        } catch (Exception e) {
+            return streamError(e);
+        }
+        return routed
                 .timeout(Duration.ofSeconds(chatTimeoutSeconds + 30))
-                .onErrorResume(e -> {
-                    log.error("SSE stream error: {}", e.getMessage());
-                    return Flux.just(new TextBlock("Error: " + e.getMessage(), "error"));
-                });
+                .onErrorResume(this::streamError);
+    }
+
+    private Flux<OutputBlock> streamError(Throwable error) {
+        log.error("SSE stream error", error);
+        return Flux.just(new TextBlock("Error: " + errorSanitizer.sanitize(error.getMessage()), "error"));
     }
 }

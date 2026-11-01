@@ -29,6 +29,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
 import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * ChatClient bean with composable advisor chain and tool registration.
@@ -73,8 +76,7 @@ public class ChatClientConfig {
                           SessionContextAdvisor sessionContextAdvisor,
                           ConversationSummaryAdvisor conversationSummaryAdvisor,
                           ContextCompactionAdvisor contextCompactionAdvisor,
-                          ToolCallingManager toolCallingManager,
-                          Collection<ToolCallbackProvider> toolCallbackProviders) {
+                          ToolCallingManager toolCallingManager) {
 
         var clientBuilder = builder
                 .defaultAdvisors(
@@ -94,7 +96,8 @@ public class ChatClientConfig {
                                 .build()
                 );
 
-        registerCallbacksDefensively(clientBuilder, toolCallbackProviders);
+        // Interactive requests supply only the active persona's callbacks in AgentService.
+        // ChatClient adds request callbacks to defaults, so defaults must stay empty here.
         return clientBuilder.build();
     }
 
@@ -112,8 +115,9 @@ public class ChatClientConfig {
      * one-paragraph operator-facing message — the LLM doesn't get a chance to hallucinate the
      * cause when the peer restarts.
      */
-    private static void registerCallbacksDefensively(ChatClient.Builder clientBuilder,
+    private static Set<String> registerCallbacksDefensively(ChatClient.Builder clientBuilder,
                                                      Collection<ToolCallbackProvider> toolCallbackProviders) {
+        Set<String> toolNames = new LinkedHashSet<>();
         for (ToolCallbackProvider provider : toolCallbackProviders) {
             ToolCallback[] callbacks;
             try {
@@ -127,9 +131,11 @@ public class ChatClientConfig {
             ToolCallback[] wrapped = new ToolCallback[callbacks.length];
             for (int i = 0; i < callbacks.length; i++) {
                 wrapped[i] = new McpErrorTranslatingToolCallback(callbacks[i]);
+                toolNames.add(wrapped[i].getToolDefinition().name());
             }
             clientBuilder.defaultTools((Object[]) wrapped);
         }
+        return Set.copyOf(toolNames);
     }
 
     /**
@@ -141,8 +147,7 @@ public class ChatClientConfig {
      * tool-call advisor are kept so runs benefit from the same routing and observability surface
      * as interactive chat.
      *
-     * <p>Tool surface is identical to the primary {@link ChatClient} bean: agent-run callers can
-     * still invoke any registered {@code @Tool} method. Future work may give callers a way to
+     * <p>Agent-run callers can invoke any registered {@code @Tool} method. Future work may give callers a way to
      * opt out of specific tool families per run.
      */
     @Bean(name = "agentRunChatClient")
@@ -167,7 +172,8 @@ public class ChatClientConfig {
                                 .build()
                 );
 
-        registerCallbacksDefensively(clientBuilder, toolCallbackProviders);
+        Set<String> toolNames = registerCallbacksDefensively(clientBuilder, toolCallbackProviders);
+        clientBuilder.defaultToolContext(Map.of(DelegationTools.PERSONA_TOOLS_CONTEXT_KEY, toolNames));
         return clientBuilder.build();
     }
 }

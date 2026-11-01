@@ -27,8 +27,6 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.model.tool.ToolCallingManager;
 
-import java.util.List;
-
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
@@ -66,7 +64,7 @@ class ChatClientConfigTest {
         ChatClient client = config.chatClient(builder, memory, auditLog, sanitizer,
                 memoryAdvisor, routingAdvisor, loopAdvisor, harnessAdvisor,
                 planningModeService, sessionContextAdvisor, conversationSummaryAdvisor,
-                contextCompactionAdvisor, toolCallingManager, List.of());
+                contextCompactionAdvisor, toolCallingManager);
         // No-op: registry isn't part of the ChatClient bean signature; just ensures the
         // build still passes once we wired the Phase C registry into the advisor.
 
