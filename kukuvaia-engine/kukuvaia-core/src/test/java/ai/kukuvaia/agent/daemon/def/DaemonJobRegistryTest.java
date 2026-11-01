@@ -52,7 +52,8 @@ class DaemonJobRegistryTest {
         assertThat(registry.all()).extracting(DaemonJobDefinition::name).containsExactly("scan-job");
         assertThat(registry.rejected()).hasSize(3);
         assertThat(String.join("\n", registry.rejected()))
-                .contains("b.yaml").contains("unknown target").contains("'a2a' is not available");
+                .contains("b.yaml").contains("unknown target").contains("'a2a' is not available")
+                .contains("deferred after the T-015 spike").contains("kind: mcp");
         assertThat(registry.byWebhookRoute("scan")).map(DaemonJobDefinition::name).contains("scan-job");
     }
 

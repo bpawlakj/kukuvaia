@@ -66,7 +66,10 @@ public class DaemonJobRegistry {
             }
             DaemonExecutor executor = byKind.get(def.kind());
             if (executor == null) {
-                errors.add(def.source() + ": kind '" + def.kind().dbValue() + "' is not available in this build");
+                errors.add(def.source() + ": kind '" + def.kind().dbValue() + "' is not available in this build"
+                        + (def.kind() == JobKind.A2A
+                            ? " (A2A executor deferred after the T-015 spike — Java SDK 1.0 is still alpha; "
+                              + "reach remote agents through kind: mcp)" : ""));
                 continue;
             }
             Optional<String> problem = executor.validate(def);
