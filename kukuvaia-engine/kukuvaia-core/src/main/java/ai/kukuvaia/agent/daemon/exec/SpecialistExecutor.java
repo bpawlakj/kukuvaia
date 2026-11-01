@@ -29,6 +29,18 @@ public class SpecialistExecutor implements DaemonExecutor {
     }
 
     @Override
+    public java.util.Optional<String> validate(ai.kukuvaia.agent.daemon.def.DaemonJobDefinition definition) {
+        if (!subAgentFactory.availableSpecialists().contains(definition.target())) {
+            return java.util.Optional.of("unknown specialist '" + definition.target() + "' (available: "
+                    + new java.util.TreeSet<>(subAgentFactory.availableSpecialists()) + ")");
+        }
+        if (definition.prompt() == null || definition.prompt().isBlank()) {
+            return java.util.Optional.of("a specialist job needs a prompt");
+        }
+        return java.util.Optional.empty();
+    }
+
+    @Override
     public ExecutionOutcome execute(JobInvocation invocation, JobLimits limits) {
         SubAgentResult run = subAgentFactory.executeForResult(invocation.prompt(), invocation.target(),
                 ExecutionContext.DAEMON, invocation.provider(), 0, properties.toolScopeOrNull(),

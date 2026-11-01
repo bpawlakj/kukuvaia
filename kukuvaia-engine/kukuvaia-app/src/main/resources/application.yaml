@@ -18,6 +18,11 @@ kukuvaia:
     # Daemon runs executing at once (all kinds) and admitted runs allowed to wait for a slot.
     max-concurrent: 2
     max-queued: 100
+    # Job definitions: built-ins from classpath:daemon/*.yaml. Project jobs from .kukuvaia/daemon/*.yaml
+    # only when enabled — CLI mode on your own machine; keep false on servers (server-controlled config).
+    project-jobs: ${KUKUVAIA_DAEMON_PROJECT_JOBS:false}
+    scheduler-pool-size: 2
+    zone: ${KUKUVAIA_DAEMON_ZONE:}
   subagent:
     max-parallel-workers: 3
   webhooks:

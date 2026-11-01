@@ -50,6 +50,13 @@ public class JavaJobExecutor implements DaemonExecutor {
     }
 
     @Override
+    public java.util.Optional<String> validate(ai.kukuvaia.agent.daemon.def.DaemonJobDefinition definition) {
+        return jobs.containsKey(definition.target())
+                ? java.util.Optional.empty()
+                : java.util.Optional.of("no DaemonJob bean named '" + definition.target() + "' (available: " + jobs.keySet() + ")");
+    }
+
+    @Override
     public ExecutionOutcome execute(JobInvocation invocation, JobLimits limits) throws Exception {
         DaemonJob job = jobs.get(invocation.target());
         if (job == null) {

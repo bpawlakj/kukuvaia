@@ -38,6 +38,23 @@ public class DaemonConfig {
         /** Admitted runs waiting for a slot; beyond this, new runs are SKIPPED (backpressure). */
         private int maxQueued = 100;
 
+        /** Load {@code .kukuvaia/daemon/*.yaml} (CLI mode only; keep false on servers). */
+        private boolean projectJobs = false;
+        /** Threads of the dedicated cron scheduler (firing only submits to the runtime). */
+        private int schedulerPoolSize = 2;
+        /** Time zone for cron expressions; empty = system default. */
+        private String zone = "";
+
+        public boolean isProjectJobs() { return projectJobs; }
+        public void setProjectJobs(boolean projectJobs) { this.projectJobs = projectJobs; }
+        public int getSchedulerPoolSize() { return schedulerPoolSize; }
+        public void setSchedulerPoolSize(int size) { this.schedulerPoolSize = Math.max(1, size); }
+        public String getZone() { return zone; }
+        public void setZone(String zone) { this.zone = zone == null ? "" : zone; }
+        public java.time.ZoneId zoneId() {
+            return zone.isBlank() ? java.time.ZoneId.systemDefault() : java.time.ZoneId.of(zone);
+        }
+
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public int getMaxConcurrent() { return maxConcurrent; }
