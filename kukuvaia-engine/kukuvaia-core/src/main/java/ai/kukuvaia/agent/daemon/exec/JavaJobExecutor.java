@@ -100,11 +100,12 @@ public class JavaJobExecutor implements DaemonExecutor {
 
         @Override
         public boolean isCancelled() {
-            return Thread.currentThread().isInterrupted() || Instant.now().isAfter(invocation.deadline());
+            return invocation.lifetime().isClosed() || Thread.currentThread().isInterrupted()
+                    || Instant.now().isAfter(invocation.deadline());
         }
 
         @Override
-        public SubAgentResult callSpecialist(String specialist, String prompt) {
+        public synchronized SubAgentResult callSpecialist(String specialist, String prompt) {
             if (isCancelled()) {
                 throw new IllegalStateException("Daemon job '" + jobName() + "' is cancelled — specialist not called");
             }
@@ -117,9 +118,12 @@ public class JavaJobExecutor implements DaemonExecutor {
             }
             int failureCharge = reserve; // fail closed if the call throws after it started
             boolean counted = false;
+            int outstandingReservation = reserve;
             try {
+                budget.precharge(taskId(), reserve, promptTokens.get() + completionTokens.get() + reserve);
+                outstandingReservation = 0;
                 SubAgentResult result = subAgentFactory.executeForResult(prompt, specialist, ExecutionContext.DAEMON,
-                        null, 0, properties.toolScopeOrNull());
+                        invocation.provider(), 0, properties.toolScopeOrNull(), 0, 0, invocation.lifetime());
                 if (result.usageReported()) {
                     promptTokens.addAndGet(result.promptTokens());
                     completionTokens.addAndGet(result.completionTokens());
@@ -134,11 +138,14 @@ public class JavaJobExecutor implements DaemonExecutor {
                 failureCharge = 0; // pre-flight: no model call happened
                 throw e;
             } finally {
-                if (!counted) {
-                    promptTokens.addAndGet(failureCharge);
+                if (outstandingReservation > 0) {
+                    // Persistence failed before the model started; this reservation was never spent.
+                    budget.releaseReservation(outstandingReservation);
+                } else {
+                    if (!counted) promptTokens.addAndGet(failureCharge);
+                    // The conservative charge is already durable; replace it with cumulative actual usage.
+                    budget.settle(taskId(), 0, promptTokens.get() + completionTokens.get());
                 }
-                // token_usage holds this task's cumulative usage; the reservation is released here.
-                budget.settle(taskId(), reserve, promptTokens.get() + completionTokens.get());
             }
         }
     }

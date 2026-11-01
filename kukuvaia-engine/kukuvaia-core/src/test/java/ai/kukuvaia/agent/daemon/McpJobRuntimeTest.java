@@ -60,7 +60,7 @@ class McpJobRuntimeTest {
         var properties = new DaemonProperties();
         properties.setCancelGraceMillis(500);
         properties.setMcpAllowedTools(List.of("toolkit/echo", "toolkit/slow", "toolkit/fail", "toolkit/nosuch", "toolkit/big",
-                "ghost/echo"));
+                "ghost/echo", "toolkit/sensitive"));
         var executor = new McpToolExecutor(beans.getBeanProvider(McpClientRegistry.class), new ErrorSanitizer(),
                 beans.getBeanProvider(ObjectMapper.class), properties);
         registry = new DaemonJobRegistry(List.of(executor), List.of(
@@ -76,6 +76,7 @@ class McpJobRuntimeTest {
                 Map.entry("fail.yaml", "name: toolkit-fail\nkind: mcp\ntarget: { connection: toolkit, tool: fail }\n"),
                 Map.entry("nosuch.yaml", "name: toolkit-nosuch\nkind: mcp\ntarget: { connection: toolkit, tool: nosuch }\n"),
                 Map.entry("big.yaml", "name: toolkit-big\nkind: mcp\ntarget: { connection: toolkit, tool: big }\n"),
+                Map.entry("sensitive.yaml", "name: toolkit-sensitive\nkind: mcp\ntarget: { connection: toolkit, tool: sensitive }\n"),
                 Map.entry("denied.yaml", "name: toolkit-denied\nkind: mcp\ntarget: { connection: toolkit, tool: delete_everything }\n"),
                 Map.entry("ghost.yaml", "name: ghost-job\nkind: mcp\ntarget: { connection: ghost, tool: echo }\n")));
         runtime = new DaemonRuntime(List.of(executor), DaemonRuntimeTest.budget(100_000, new AtomicInteger(), store.order),
@@ -149,6 +150,19 @@ class McpJobRuntimeTest {
     }
 
     @Test
+    void structuredOutputIsRedactedRecursivelyBeforePersistence() {
+        DaemonTaskResult r = run("toolkit-sensitive", Map.of());
+
+        assertThat(r.status()).isEqualTo(DaemonTaskStatus.COMPLETED);
+        JsonNode output = (JsonNode) store.outputs.get(r.taskId());
+        assertThat(output.toString()).contains("[REDACTED]")
+                .doesNotContain("jdbc:", "synthetic-password", "fake-token", "eyJ", "/Users/test");
+        assertThat(output.path("nested").path("count").asInt()).isEqualTo(3);
+        assertThat(output.path("nested").path("ok").asBoolean()).isTrue();
+        assertThat(output.path("items").get(0).asString()).isEqualTo("[REDACTED]");
+    }
+
+    @Test
     @DisplayName("unknown connection → job rejected at load with a clear error")
     void unknownConnection() {
         assertThat(registry.find("ghost-job")).isEmpty();
@@ -176,7 +190,7 @@ class McpJobRuntimeTest {
                 yield Map.of("protocolVersion", req.path("params").path("protocolVersion").asString(),
                         "capabilities", Map.of("tools", Map.of()), "serverInfo", Map.of("name", "stub", "version", "1"));
             }
-            case "tools/list" -> Map.of("tools", List.of(tool("echo"), tool("slow"), tool("fail"), tool("big")));
+            case "tools/list" -> Map.of("tools", List.of(tool("echo"), tool("slow"), tool("fail"), tool("big"), tool("sensitive")));
             case "tools/call" -> call(req.path("params"));
             default -> Map.of();
         };
@@ -200,6 +214,10 @@ class McpJobRuntimeTest {
             }
             case "big" -> Map.of("content", List.of(Map.of("type", "text", "text", "x".repeat(300_000))),
                     "structuredContent", Map.of("blob", "y".repeat(200_000)));
+            case "sensitive" -> Map.of("content", List.of(Map.of("type", "text", "text", "safe summary")),
+                    "structuredContent", Map.of("connection", "jdbc:postgresql://internal:5432/db?password=synthetic-password",
+                            "nested", Map.of("token", "Bearer fake-token", "count", 3, "ok", true),
+                            "items", List.of("/Users/test/config.yaml", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.signature")));
             case "slow" -> {
                 try { Thread.sleep(5000); } catch (InterruptedException ignored) { }
                 yield Map.of("content", List.of(Map.of("type", "text", "text", "late")));

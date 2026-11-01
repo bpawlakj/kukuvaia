@@ -2,6 +2,7 @@ package ai.kukuvaia.agent.daemon.exec;
 
 import java.time.Instant;
 import java.util.Map;
+import ai.kukuvaia.agent.subagent.ExecutionLifetime;
 
 /**
  * One run of a daemon job as seen by an executor.
@@ -16,11 +17,18 @@ import java.util.Map;
  * @param args     {@code kind: mcp} argument template from the job definition (rendered by the executor)
  */
 public record JobInvocation(long taskId, String jobName, String target, String prompt,
-                            Map<String, String> fields, String provider, Instant deadline, Map<String, Object> args) {
+                            Map<String, String> fields, String provider, Instant deadline, Map<String, Object> args,
+                            ExecutionLifetime lifetime) {
 
     public JobInvocation {
         fields = fields == null ? Map.of() : Map.copyOf(fields);
         args = args == null ? Map.of() : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(args));
+        if (lifetime == null) lifetime = new ExecutionLifetime();
+    }
+
+    public JobInvocation(long taskId, String jobName, String target, String prompt,
+                         Map<String, String> fields, String provider, Instant deadline, Map<String, Object> args) {
+        this(taskId, jobName, target, prompt, fields, provider, deadline, args, new ExecutionLifetime());
     }
 
     public JobInvocation(long taskId, String jobName, String target, String prompt,

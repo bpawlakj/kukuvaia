@@ -57,8 +57,12 @@ class DaemonTaskMigrationTest {
         ReflectionTestUtils.setField(budget, "alertThreshold", 0.8);
         var specialists = mock(SubAgentFactory.class);
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull(), anyInt(), anyInt()))
-                .thenReturn(new SubAgentResult("Build failure analyzed", 100, 23, true));
+                eq(0), isNull(), anyInt(), anyInt(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(invocation -> {
+                    assertThat(jdbc.queryForObject("SELECT token_usage FROM kukuvaia_agent.daemon_tasks "
+                            + "ORDER BY id DESC LIMIT 1", Integer.class)).isPositive();
+                    return new SubAgentResult("Build failure analyzed", 100, 23, true);
+                });
         var properties = new DaemonProperties();
         var runtime = new DaemonRuntime(List.of(new SpecialistExecutor(specialists, properties)), budget,
                 new DaemonScheduleGuard(), new DaemonTaskStore(jdbc), properties, new ErrorSanitizer(),
@@ -100,7 +104,7 @@ class DaemonTaskMigrationTest {
         assertThat(budget.getRemainingBudget()).isEqualTo(99_877);
 
         when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
-                eq(0), isNull(), anyInt(), anyInt()))
+                eq(0), isNull(), anyInt(), anyInt(), org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new IllegalStateException("Synthetic specialist failure"));
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
@@ -158,6 +162,14 @@ class DaemonTaskMigrationTest {
                 Integer.class)).isEqualTo(20_000);
         assertThat(jdbc.queryForObject("SELECT status || '|' || error FROM kukuvaia_agent.daemon_tasks WHERE name = 'stale-q'",
                 String.class)).isEqualTo("CANCELLED|interrupted by restart (was QUEUED)");
+        // A job queued yesterday but started today belongs to today's token budget.
+        var dayBudget = new DaemonBudgetGuard(jdbc);
+        int before = dayBudget.todayTokenUsage();
+        jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks "
+                + "(name, kind, target, trigger_source, status, token_usage, created_at, started_at) "
+                + "VALUES ('cross-midnight', 'specialist', 'analyst', 'cron', 'COMPLETED', 123, "
+                + "CURRENT_DATE - interval '2 days', CURRENT_DATE + interval '12 hours')");
+        assertThat(dayBudget.todayTokenUsage()).isEqualTo(before + 123);
         // New lifecycle states are accepted; unknown ones are not.
         jdbc.update("INSERT INTO kukuvaia_agent.daemon_tasks (name, kind, target, trigger_source, status) "
                 + "VALUES ('scan', 'java', 'astralScan', 'cron', 'QUEUED')");

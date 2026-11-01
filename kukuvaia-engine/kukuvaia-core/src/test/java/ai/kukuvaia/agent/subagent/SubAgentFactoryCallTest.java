@@ -32,6 +32,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 
 @DisplayName("SubAgentFactory — single call: usage, audit, timeout")
 class SubAgentFactoryCallTest {
@@ -77,7 +79,11 @@ class SubAgentFactoryCallTest {
                 "analyst", new SubAgentSpec("analyst", "test", null, null, "You analyse.",
                         List.of(), null, 1024, 5, 0.1, 2),
                 "looper", new SubAgentSpec("looper", "calls tools", null, null, "You use tools.",
-                        List.of("echo"), null, 1024, 2, 0.1, 10)));
+                        List.of("echo"), null, 1024, 2, 0.1, 10),
+                "tiered", new SubAgentSpec("tiered", "worker", null, "worker", "You analyse.",
+                        List.of(), null, 1024, 5, 0.1, 2),
+                "configured-copilot", new SubAgentSpec("configured-copilot", "interactive Copilot", "copilot", null,
+                        "You analyse.", List.of(), null, 1024, 5, 0.1, 2)));
         ToolRegistryConfig tools = mock(ToolRegistryConfig.class);
         when(tools.resolveAll(anyCollection())).thenAnswer(inv ->
                 ((java.util.Collection<?>) inv.getArgument(0)).contains("echo")
@@ -251,6 +257,58 @@ class SubAgentFactoryCallTest {
         // 3 model calls (2 tool rounds + final) × (10 prompt + 2 completion)
         assertThat(result.promptTokens()).isEqualTo(30);
         assertThat(result.completionTokens()).isEqualTo(6);
+    }
+
+    @Test
+    void executeForResult_partialUsageIsNeverMarkedComplete() {
+        ChatModel loop = toolLoopModel(1, 8, 2);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        ChatModel partial = new ChatModel() {
+            public ChatResponse call(Prompt prompt) {
+                ChatResponse response = loop.call(prompt);
+                return calls.getAndIncrement() == 0 ? new ChatResponse(response.getResults()) : response;
+            }
+            public org.springframework.ai.chat.prompt.ChatOptions getOptions() { return loop.getOptions(); }
+        };
+        when(providerService.resolve(any(), any())).thenReturn(partial);
+
+        SubAgentResult result = factory.executeForResult("task", "looper", ExecutionContext.DAEMON, null, 0, null);
+
+        assertThat(result.totalTokens()).isEqualTo(10);
+        assertThat(result.usageReported()).as("one unmetered round requires conservative charging").isFalse();
+    }
+
+    @Test
+    void executeForResult_preservesNativeTransportIncompleteUsage() {
+        when(providerService.resolve(any(), any())).thenReturn(model(prompt -> new ChatResponse(answer("ok", 8, 2).getResults(),
+                ChatResponseMetadata.builder().usage(new DefaultUsage(8, 2))
+                        .keyValue(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE, false).build())));
+
+        var result = factory.executeForResult("task", "analyst", ExecutionContext.DAEMON, null, 0, null);
+
+        assertThat(result.totalTokens()).isEqualTo(10);
+        assertThat(result.usageReported()).isFalse();
+    }
+
+    @Test
+    void executeForResult_explicitCopilotOptInTakesPrecedenceOverTier() {
+        when(providerService.resolveByRole("worker", ExecutionContext.DAEMON))
+                .thenThrow(new LlmProviderService.DaemonProviderPolicyException("worker is Copilot"));
+        when(providerService.resolve("copilot", ExecutionContext.DAEMON)).thenReturn(model(p -> answer("opted in", 1, 1)));
+
+        assertThat(factory.executeForResult("task", "tiered", ExecutionContext.DAEMON, "copilot", 0, null).content())
+                .isEqualTo("opted in");
+        verify(providerService, never()).resolveByRole("worker", ExecutionContext.DAEMON);
+    }
+
+    @Test
+    void executeForResult_specialistProviderIsNotADaemonJobOptIn() {
+        when(providerService.resolve(null, ExecutionContext.DAEMON)).thenReturn(model(prompt -> answer("daemon default", 1, 1)));
+
+        var result = factory.executeForResult("task", "configured-copilot", ExecutionContext.DAEMON, null, 0, null);
+
+        assertThat(result.content()).isEqualTo("daemon default");
+        verify(providerService, never()).resolve("copilot", ExecutionContext.DAEMON);
     }
 
     @Test

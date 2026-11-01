@@ -11,7 +11,7 @@ import org.springframework.ai.chat.model.ChatResponse;
  * @param content          the sub-agent's final answer (may be {@code null} if the model returned nothing)
  * @param promptTokens     prompt tokens reported by the provider (0 when not reported)
  * @param completionTokens completion tokens reported by the provider (0 when not reported)
- * @param usageReported    {@code false} when the provider returned no usage at all — callers that
+ * @param usageReported    {@code false} when any model round omitted usage — callers that
  *                         enforce budgets must then fall back to a conservative estimate (fail closed)
  */
 public record SubAgentResult(String content, int promptTokens, int completionTokens, boolean usageReported, String model) {
@@ -39,6 +39,7 @@ public record SubAgentResult(String content, int promptTokens, int completionTok
         }
         int prompt = usage.getPromptTokens() != null ? usage.getPromptTokens() : 0;
         int completion = usage.getCompletionTokens() != null ? usage.getCompletionTokens() : 0;
-        return new SubAgentResult(content, prompt, completion, prompt + completion > 0, model);
+        boolean complete = !Boolean.FALSE.equals(response.getMetadata().get(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE));
+        return new SubAgentResult(content, prompt, completion, prompt + completion > 0 && complete, model);
     }
 }

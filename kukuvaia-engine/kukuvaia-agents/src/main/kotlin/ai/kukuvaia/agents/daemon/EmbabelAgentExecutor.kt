@@ -128,12 +128,15 @@ class EmbabelAgentExecutor(
         val process = agentPlatform.createAgentProcess(agent, options, bindings)
         val policy = DaemonEmbabelRuns.RunPolicy(invocation.jobName(),
             copilotAllowed = LlmProviderService.isCopilotName(invocation.provider()),
-            deadline = invocation.deadline(), tokenBudget = tokenBudget)
+            deadline = invocation.deadline(), tokenBudget = tokenBudget, maxTokens = limits.maxTokens(),
+            lifetime = invocation.lifetime())
+        val processWork = invocation.lifetime().register()
         runs.register(process.id, policy)
 
         var future: CompletableFuture<AgentProcess>? = null
         try {
             future = agentPlatform.start(process)
+            future.whenComplete { _, _ -> processWork.close() }
             try {
                 // Wait in short slices: a guard refusal (provider policy, token cap) must stop the process at
                 // once (Embabel would otherwise retry the failing action until the deadline).
@@ -185,6 +188,7 @@ class EmbabelAgentExecutor(
             policy.stopped = true
             // Keep the run registered until its process has really ended, so late calls are still refused.
             val f = future
+            if (f == null) processWork.close()
             if (f == null || f.isDone) runs.unregister(process.id)
             else f.whenComplete { _, _ -> runs.unregister(process.id) }
         }

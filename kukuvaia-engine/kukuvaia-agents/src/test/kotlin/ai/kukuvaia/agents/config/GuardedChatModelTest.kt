@@ -104,4 +104,77 @@ class GuardedChatModelTest {
             assertTrue(e is DaemonProviderPolicyException && e.message!!.contains(reason), "got $e")
         }
     }
+
+    @Test
+    fun daemonOutputCapAppliesToStreamingAndKeepsLowerRequestCaps() {
+        val policy = DaemonEmbabelRuns.RunPolicy("job", copilotAllowed = false, maxTokens = 32)
+        val runs = mock<DaemonEmbabelRuns> { on { policyFor(anyOrNull()) } doReturn policy }
+        val defaults = org.springframework.ai.openai.OpenAiChatOptions.builder().model("stub").maxTokens(8192).build()
+        val raw = object : ChatModel {
+            override fun getOptions() = defaults
+            override fun call(prompt: Prompt): ChatResponse {
+                seen = prompt
+                return ChatResponse(listOf(Generation(AssistantMessage("ok"))))
+            }
+            override fun stream(prompt: Prompt): reactor.core.publisher.Flux<ChatResponse> =
+                reactor.core.publisher.Flux.just(call(prompt))
+        }
+        val guarded = GuardedChatModel("worker", raw, copilot = false, runs = runs, meterRegistry = null)
+        guarded.stream(Prompt("hi")).blockLast()
+        assertEquals(32, seen?.options?.maxTokens)
+        assertEquals("stub", seen?.options?.model)
+        guarded.call(Prompt("hi", defaults.mutate().maxTokens(16).build()))
+        assertEquals(16, seen?.options?.maxTokens)
+        assertEquals(8192, defaults.maxTokens)
+    }
+
+    @Test
+    fun streamingRechecksPolicyAtSubscription() {
+        val policy = DaemonEmbabelRuns.RunPolicy("job", copilotAllowed = false, maxTokens = 32)
+        val runs = mock<DaemonEmbabelRuns> { on { policyFor(anyOrNull()) } doReturn policy }
+        val guarded = GuardedChatModel("worker", stub, copilot = false, runs = runs, meterRegistry = null)
+        val stream = guarded.stream(Prompt("hi"))
+        policy.stopped = true
+
+        val error = runCatching { stream.blockLast() }.exceptionOrNull()
+        assertTrue(error is DaemonProviderPolicyException, "got $error")
+        assertEquals(null, seen)
+    }
+
+    @Test
+    fun openAiCompletionTokenLimitIsCappedOnCallAndStream() {
+        val policy = DaemonEmbabelRuns.RunPolicy("job", copilotAllowed = false, maxTokens = 32)
+        val runs = mock<DaemonEmbabelRuns> { on { policyFor(anyOrNull()) } doReturn policy }
+        val defaults = org.springframework.ai.openai.OpenAiChatOptions.builder()
+            .model("reasoning-model").maxCompletionTokens(8192).build()
+        val raw = object : ChatModel {
+            override fun getOptions() = defaults
+            override fun call(prompt: Prompt): ChatResponse {
+                seen = prompt
+                return ChatResponse(listOf(Generation(AssistantMessage("ok"))))
+            }
+            override fun stream(prompt: Prompt) = reactor.core.publisher.Flux.just(call(prompt))
+        }
+        val guarded = GuardedChatModel("worker", raw, copilot = false, runs = runs, meterRegistry = null)
+        guarded.call(Prompt("hi"))
+        assertEquals(32, (seen?.options as org.springframework.ai.openai.OpenAiChatOptions).maxCompletionTokens)
+        guarded.stream(Prompt("hi", defaults.mutate().maxCompletionTokens(16).build())).blockLast()
+        assertEquals(16, (seen?.options as org.springframework.ai.openai.OpenAiChatOptions).maxCompletionTokens)
+        assertEquals(8192, defaults.maxCompletionTokens)
+    }
+
+    @Test
+    fun nativeTransportIncompleteUsageRemainsUnmetered() {
+        val policy = DaemonEmbabelRuns.RunPolicy("job", copilotAllowed = false)
+        val runs = mock<DaemonEmbabelRuns> { on { policyFor(anyOrNull()) } doReturn policy }
+        val raw = ChatModel { ChatResponse(listOf(Generation(AssistantMessage("ok"))),
+            org.springframework.ai.chat.metadata.ChatResponseMetadata.builder()
+                .usage(org.springframework.ai.chat.metadata.DefaultUsage(8, 2))
+                .keyValue(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE, false).build()) }
+
+        GuardedChatModel("worker", raw, copilot = false, runs = runs, meterRegistry = null).call(Prompt("hi"))
+
+        assertEquals(10, policy.tokens.get())
+        assertEquals(1, policy.unmetered.get())
+    }
 }

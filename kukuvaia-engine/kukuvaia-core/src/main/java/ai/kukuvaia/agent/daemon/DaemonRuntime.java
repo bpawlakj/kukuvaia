@@ -11,6 +11,7 @@ import ai.kukuvaia.agent.daemon.exec.JobKind;
 import ai.kukuvaia.agent.daemon.exec.JobLimits;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
 import ai.kukuvaia.agent.subagent.SubAgentGuard;
+import ai.kukuvaia.agent.subagent.ExecutionLifetime;
 import ai.kukuvaia.provider.service.LlmProviderService;
 import ai.kukuvaia.security.ErrorSanitizer;
 import io.micrometer.core.instrument.Counter;
@@ -27,7 +28,6 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -171,7 +171,8 @@ public class DaemonRuntime {
         try {
             dispatcher.submit(() -> run(job, request, admission));
         } catch (RuntimeException e) { // executor shut down
-            waiting.decrementAndGet();
+            if (admission.queued()) waiting.decrementAndGet();
+            if (admission.slotAcquired()) slots.release();
             abandon(admission, job, DaemonTaskStatus.CANCELLED, "daemon runtime is shutting down");
             return new Submission(admission.taskId(), DaemonTaskStatus.CANCELLED, "daemon runtime is shutting down");
         }
@@ -202,7 +203,7 @@ public class DaemonRuntime {
     // ── Admission ────────────────────────────────────────────────────────────
 
     private record Admission(long taskId, int reservedTokens, boolean skipped, String reason,
-                             Runnable releaseOverlap, boolean queued) {}
+                             Runnable releaseOverlap, boolean queued, boolean slotAcquired) {}
 
     private Admission admit(DaemonJobDefinition job, JobRequest request, boolean queued) {
         if (!properties.isEnabled()) {
@@ -223,12 +224,16 @@ public class DaemonRuntime {
         // Everything acquired from here on is released on every non-admitted path (incl. exceptions).
         boolean admitted = false;
         boolean counted = false;
+        boolean slotAcquired = false;
         int reserved = 0;
         try {
             if (queued) {
-                counted = true;
-                if (waiting.incrementAndGet() > properties.getMaxQueued()) {
-                    return skipped(job, request, "daemon queue full (" + properties.getMaxQueued() + ")");
+                slotAcquired = waiting.get() == 0 && slots.tryAcquire();
+                if (!slotAcquired) {
+                    counted = true;
+                    if (waiting.incrementAndGet() > properties.getMaxQueued()) {
+                        return skipped(job, request, "daemon queue full (" + properties.getMaxQueued() + ")");
+                    }
                 }
             }
             if (job.kind().consumesLocalTokens()) {
@@ -240,12 +245,13 @@ public class DaemonRuntime {
             }
             long taskId = store.insertQueued(job, request);
             admitted = true;
-            return new Admission(taskId, reserved, false, null, releaseOverlap, queued);
+            return new Admission(taskId, reserved, false, null, releaseOverlap, counted, slotAcquired);
         } finally {
             if (!admitted) {
                 releaseOverlap.run();
                 if (reserved > 0) budget.releaseReservation(reserved);
                 if (counted) waiting.decrementAndGet();
+                if (slotAcquired) slots.release();
             }
         }
     }
@@ -254,7 +260,7 @@ public class DaemonRuntime {
         log.info("Daemon job '{}' skipped ({}): {}", job.name(), request.triggerSource(), reason);
         long taskId = store.insertSkipped(job, request, reason);
         recordMetrics(job, DaemonTaskStatus.SKIPPED, 0);
-        return new Admission(taskId, 0, true, reason, () -> { }, false);
+        return new Admission(taskId, 0, true, reason, () -> { }, false, false);
     }
 
     private Runnable acquireOverlap(DaemonJobDefinition job) {
@@ -277,11 +283,13 @@ public class DaemonRuntime {
 
     private DaemonTaskResult run(DaemonJobDefinition job, JobRequest request, Admission admission) {
         long taskId = admission.taskId();
-        boolean haveSlot = false;
+        boolean haveSlot = admission.slotAcquired();
         try {
             try {
-                slots.acquire();
-                haveSlot = true;
+                if (!haveSlot) {
+                    slots.acquire();
+                    haveSlot = true;
+                }
             } finally {
                 if (admission.queued()) waiting.decrementAndGet();
             }
@@ -295,27 +303,24 @@ public class DaemonRuntime {
         Instant startedAt = Instant.now();
         long startNanos = System.nanoTime();
         boolean settled = false;
-        CountDownLatch callDone = null;
+        int outstandingReservation = admission.reservedTokens();
+        ExecutionLifetime lifetime = new ExecutionLifetime();
         try {
             store.markRunning(taskId);
+            if (outstandingReservation > 0) {
+                budget.precharge(taskId, outstandingReservation, outstandingReservation);
+                outstandingReservation = 0;
+            }
             Duration timeout = job.limits().timeout();
             JobInvocation invocation = new JobInvocation(taskId, job.name(), job.target(), request.prompt(),
-                    request.fields(), job.provider(), startedAt.plus(timeout), job.args());
+                    request.fields(), job.provider(), startedAt.plus(timeout), job.args(), lifetime);
             DaemonExecutor executor = executors.get(job.kind());
 
             ExecutionOutcome outcome = null;
             DaemonTaskStatus status;
             String error = null;
             int charge;
-            CountDownLatch workDone = new CountDownLatch(1);
-            Future<ExecutionOutcome> call = callRunner.submit(() -> {
-                try {
-                    return executor.execute(invocation, job.limits());
-                } finally {
-                    workDone.countDown();
-                }
-            });
-            callDone = workDone;
+            Future<ExecutionOutcome> call = lifetime.submit(callRunner, () -> executor.execute(invocation, job.limits()));
             try {
                 outcome = call.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
                 status = DaemonTaskStatus.COMPLETED;
@@ -352,7 +357,7 @@ public class DaemonRuntime {
 
             // 1) Usage first, independently of the audit row — a DB error finalizing the row must
             //    not lose the tokens, and a budget error must not flip a completed run to FAILED.
-            settled = settle(taskId, admission.reservedTokens(), charge, job);
+            settled = settle(taskId, outstandingReservation, charge, job);
             // 2) Finalize the audit row.
             try {
                 if (status == DaemonTaskStatus.COMPLETED) {
@@ -379,7 +384,7 @@ public class DaemonRuntime {
             long durationMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
             String error = errorSanitizer.sanitize(e.getMessage());
             if (!settled) {
-                budget.releaseReservation(admission.reservedTokens());
+                budget.releaseReservation(outstandingReservation);
             }
             try {
                 store.markFinished(taskId, DaemonTaskStatus.FAILED, error, durationMs);
@@ -391,7 +396,8 @@ public class DaemonRuntime {
             return notified(job,
                     terminal(taskId, job, request, DaemonTaskStatus.FAILED, null, error, 0, durationMs, startedAt, Instant.now()));
         } finally {
-            releaseWhenWorkEnds(job, taskId, callDone, haveSlot, admission.releaseOverlap());
+            lifetime.close();
+            releaseWhenWorkEnds(job, taskId, lifetime, haveSlot, admission.releaseOverlap());
         }
     }
 
@@ -400,16 +406,16 @@ public class DaemonRuntime {
      * ignores interruption after its deadline keeps both (it still counts against max-concurrent and
      * overlap: skip), and they are released by a hook when it finally returns.
      */
-    private void releaseWhenWorkEnds(DaemonJobDefinition job, long taskId, CountDownLatch callDone,
+    private void releaseWhenWorkEnds(DaemonJobDefinition job, long taskId, ExecutionLifetime lifetime,
                                      boolean haveSlot, Runnable releaseOverlap) {
         Runnable release = () -> {
             if (haveSlot) slots.release();
             releaseOverlap.run();
         };
-        boolean finished = callDone == null || callDone.getCount() == 0;
+        boolean finished = lifetime.isFinished();
         if (!finished) {
             try {
-                finished = callDone.await(properties.getCancelGraceMillis(), TimeUnit.MILLISECONDS);
+                finished = lifetime.await(properties.getCancelGraceMillis());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -423,9 +429,7 @@ public class DaemonRuntime {
                 taskId, job.name());
         Thread.ofVirtual().name("kukuvaia-daemon-zombie-" + taskId).start(() -> {
             try {
-                callDone.await();
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
+                lifetime.await();
             } finally {
                 zombies.decrementAndGet();
                 release.run();
@@ -441,7 +445,7 @@ public class DaemonRuntime {
 
     /** Record usage against the budget. Returns true once the reservation has been released. */
     private boolean settle(long taskId, int reserved, int charge, DaemonJobDefinition job) {
-        if (reserved == 0 && charge == 0) {
+        if (reserved == 0 && charge == 0 && !job.kind().consumesLocalTokens()) {
             return true;
         }
         try {
@@ -449,7 +453,7 @@ public class DaemonRuntime {
             return true;
         } catch (RuntimeException e) {
             log.error("Could not record {} tokens for daemon task {} ('{}'): {}", charge, taskId, job.name(), e.getMessage());
-            return true; // settle() releases the reservation in a finally block
+            return true; // durable precharge remains; settle() retains retryable debt in the guard
         }
     }
 

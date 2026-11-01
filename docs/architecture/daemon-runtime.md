@@ -34,12 +34,21 @@ uses. That path brings `ToolResultSanitizingAdvisor`, `ProviderAuditLog` and `Su
 tools, depth 1). Tools are the intersection of the specialist's tools with
 `kukuvaia.daemon.allowed-tools` when that list is non-empty. `max_tool_rounds` is enforced by
 `ToolRoundLimiter` (shared budget per call). `max_tokens` caps each response (`min(spec, job)`).
+An explicit job provider takes precedence over the specialist tier and parallel worker pool.
+Usage counts as complete only when every model round reports usage; Spring AI's aggregate omits
+unmetered rounds, so completeness is tracked before aggregation. Native Anthropic and Responses
+transports sum their internal HTTP rounds and carry a completeness marker to both specialist and
+Embabel accounting. Tool-budget aborts propagate through native loops as control exceptions.
 
 ### Embabel
 
 - `token_budget` maps to Embabel `Budget.tokens` (checked between actions). It is also enforced per model
   call by `GuardedChatModel`, so the cap holds inside a single action.
 - `max_actions` maps to `Budget.actions`.
+- `max_tokens` lowers the output cap on every guarded call and stream while preserving the provider's
+  option type and any lower request cap, including OpenAI's `maxCompletionTokens`. The native
+  Anthropic, Responses, and Chat Completions wire requests honor that effective limit. Stream policy
+  is checked when each subscription starts.
 - The deadline is enforced three ways: a termination policy between actions, a refusal of every model
   call after it, and `killAgentProcess` on expiry.
 - Embabel 1.5.4 quirks we work around:
@@ -66,7 +75,8 @@ tools, depth 1). Tools are the intersection of the specialist's tools with
 - Arguments come only from `args:`, a flat map of scalars. String values are templates over declared
   fields, rendered flattened. Arguments are never built by splicing text into JSON.
 - The result is data: redacted by `ErrorSanitizer` and capped at 64 KiB. A tool-level error becomes
-  FAILED with a fixed message.
+  FAILED with a fixed message. Structured result strings and keys are redacted recursively before
+  persistence; numbers and booleans retain their types. The size cap applies after redaction as well.
 - An unknown connection is rejected at load. An unknown tool is FAILED and the error lists the tools
   that are available.
 - Connections come from `kukuvaia.mcp_connections`, with `transport` set to `sse` or `streamable-http`
@@ -75,6 +85,8 @@ tools, depth 1). Tools are the intersection of the specialist's tools with
 - Responses are capped at 4 MiB at the transport; structured output above 64 KiB is not stored.
 - The admin API (`/api/admin/mcp/connections`) has these rules:
   - It accepts only http(s) URLs that are not link-local.
+  - Both endpoint paths are origin-relative URIs. Network-path references (`//host/path`), schemes,
+    fragments, and invalid URI syntax are refused by the API and the connection model.
   - Credential-like headers must be `env:` references.
   - Responses mask literal header values.
 - An in-flight call is bounded by `spring.ai.mcp.client.request-timeout`. Until then the runtime holds
@@ -134,10 +146,21 @@ enabled: true
   (`max-queued`, default 100), then a budget reservation of `token_budget`. A budget refusal gives
   SKIPPED and the executor is never called.
 - **Concurrency**: `max-concurrent` (default 2) runs at once, on virtual threads.
+  An idle slot is assigned before counting a run as queued; `max-queued: 0` permits immediate work
+  and refuses submissions that would wait.
 - **Deadline**: the run is cancelled at `timeout` (TIMEOUT). A run that ignores cancellation keeps its
   slot and overlap lock until it really ends (zombie hold, `cancel-grace-millis`).
+  `ExecutionLifetime` in the existing sub-agent package includes nested specialist tasks, Embabel
+  processes, and guarded model calls. Cancelled futures are not treated as proof that work stopped;
+  registrations close in the actual callable's `finally`, including cancellation before startup.
 - **Fail-closed tokens**: a run is charged its reported usage. Without reported usage it is charged
   `token_budget`. Pre-flight failures (unknown specialist, provider policy) cost nothing.
+  Before LLM work starts, its conservative charge is persisted and atomically replaces the in-memory
+  reservation. Java specialist calls serialize their cumulative charges and preserve the job's
+  provider override. Final settlement replaces the estimate with actual usage; failed writes retain
+  the durable estimate and retryable debt. A failed monitoring read cannot undo a successful charge.
+  Daily usage follows `started_at` (falling back to `created_at`), so queued work crossing midnight is
+  charged to its execution day; V26 indexes this expression.
 - **Provider policy** (`LlmProviderService`): DAEMON work uses the `kukuvaia.daemon.default-provider`
   role (default `daemon`, which should point at SmartGate) and falls back to `supervisor`. It refuses
   Copilot unless the job names `provider: copilot`, and refuses providers without metadata.

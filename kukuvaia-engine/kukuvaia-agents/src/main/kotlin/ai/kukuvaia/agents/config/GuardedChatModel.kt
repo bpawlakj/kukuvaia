@@ -2,6 +2,7 @@ package ai.kukuvaia.agents.config
 
 import ai.kukuvaia.agents.daemon.DaemonEmbabelRuns
 import ai.kukuvaia.provider.service.LlmProviderService.DaemonProviderPolicyException
+import ai.kukuvaia.provider.transport.OutputTokenLimits
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.NonRetryable
@@ -46,26 +47,47 @@ class GuardedChatModel(
 
     override fun call(prompt: Prompt): ChatResponse {
         val scope = checkPolicy()
-        val response = delegate.call(guard(prompt))
-        record(scope, response)
-        return response
+        val work = scope.policy?.lifetime?.register()
+        try {
+            val response = delegate.call(guard(prompt, scope))
+            record(scope, response)
+            return response
+        } finally {
+            work?.close()
+        }
     }
 
     override fun stream(prompt: Prompt): Flux<ChatResponse> {
-        val scope = checkPolicy()
-        scope.policy?.unmetered?.incrementAndGet() // streamed usage is not reliably reported
-        return delegate.stream(guard(prompt)).doOnNext { record(scope, it, streaming = true) }
+        // Capture ownership on the Embabel thread, then enforce policy on every subscription.
+        val captured = resolveScope()
+        return Flux.defer {
+            val scope = checkPolicy(captured)
+            scope.policy?.unmetered?.incrementAndGet() // streamed usage is not reliably reported
+            val work = scope.policy?.lifetime?.register()
+            try {
+                delegate.stream(guard(prompt, scope)).doOnNext { record(scope, it, streaming = true) }
+                    .doFinally { work?.close() }
+            } catch (e: Throwable) {
+                work?.close()
+                Flux.error(e)
+            }
+        }
     }
 
-    override fun getDefaultOptions(): ChatOptions = delegate.defaultOptions
+    override fun getOptions(): ChatOptions = delegate.options
 
-    private fun checkPolicy(): Scope {
+    private fun resolveScope(): Scope {
         val process = AgentProcess.get()
         val policy = runs?.policyFor(process)
         // No Embabel process visible on this thread (e.g. a thread the agent started itself) while daemon
         // runs are active: we cannot tell whose call this is — treat it as daemon work (fail closed).
         val daemon = policy != null || (process == null && (runs?.active() ?: 0) > 0)
-        if (!daemon) return Scope(null, false)
+        return Scope(policy, daemon)
+    }
+
+    private fun checkPolicy(scope: Scope = resolveScope()): Scope {
+        val policy = scope.policy
+        if (!scope.daemon) return scope
 
         val job = policy?.jobName ?: "(unidentified daemon thread)"
         val how = "Embabel role '$role' of daemon job '$job'"
@@ -99,14 +121,22 @@ class GuardedChatModel(
         throw e
     }
 
-    private fun guard(prompt: Prompt): Prompt = prompt.augmentSystemMessage(ToolResultSanitizingAdvisor.SAFETY_SUFFIX)
+    private fun guard(prompt: Prompt, scope: Scope): Prompt {
+        val secured = prompt.augmentSystemMessage(ToolResultSanitizingAdvisor.SAFETY_SUFFIX)
+        val cap = scope.policy?.maxTokens ?: 0
+        if (cap <= 0) return secured
+        val options = prompt.options ?: delegate.options
+        return Prompt(secured.instructions, OutputTokenLimits.cap(options, cap))
+    }
 
     private fun record(scope: Scope, response: ChatResponse?, streaming: Boolean = false) {
         val usage = response?.metadata?.usage
         val total = (usage?.promptTokens ?: 0) + (usage?.completionTokens ?: 0)
         scope.policy?.let { policy ->
             if (total > 0) policy.tokens.addAndGet(total)
-            else if (!streaming) policy.unmetered.incrementAndGet()
+            if (!streaming && (total <= 0 || response?.metadata?.get<Boolean>(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE) == false)) {
+                policy.unmetered.incrementAndGet()
+            }
         }
         val registry = meterRegistry ?: return
         if (!streaming) {

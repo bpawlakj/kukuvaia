@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 @DisplayName("JavaJobExecutor — DaemonJob beans under the daemon runtime")
 class JavaJobExecutorTest {
@@ -96,7 +97,8 @@ class JavaJobExecutorTest {
     void callSpecialist_accounted() {
         when(factory.spec("analyst")).thenReturn(Optional.of(new SubAgentSpec("analyst", "", null, null, "p",
                 List.of(), null, 1000, 3, 0.1, 30)));
-        when(factory.executeForResult(eq("summarize"), eq("analyst"), eq(ExecutionContext.DAEMON), any(), anyInt(), any()))
+        when(factory.executeForResult(eq("summarize"), eq("analyst"), eq(ExecutionContext.DAEMON), any(), anyInt(), any(),
+                anyInt(), anyInt(), any()))
                 .thenReturn(new SubAgentResult("summary", 40, 10, true));
         runtime(100_000, job("ask", ctx -> JobResult.of(ctx.callSpecialist("analyst", "summarize").content())));
 
@@ -105,6 +107,24 @@ class JavaJobExecutorTest {
         assertThat(r.result()).isEqualTo("summary");
         assertThat(r.tokenUsage()).isEqualTo(50);
         assertThat(ledger.get()).as("daily budget charged the task's usage once").isEqualTo(50);
+    }
+
+    @Test
+    void callSpecialist_preservesTheTrustedJobProviderOverride() {
+        when(factory.spec("analyst")).thenReturn(Optional.of(new SubAgentSpec("analyst", "", null, null, "p",
+                List.of(), null, 1000, 3, 0.1, 30)));
+        when(factory.executeForResult(eq("summarize"), eq("analyst"), eq(ExecutionContext.DAEMON), any(), anyInt(), any(),
+                anyInt(), anyInt(), any()))
+                .thenReturn(new SubAgentResult("summary", 40, 10, true));
+        runtime(100_000, job("ask", ctx -> JobResult.of(ctx.callSpecialist("analyst", "summarize").content())));
+        var original = def("ask", Duration.ofSeconds(5));
+        var explicit = new DaemonJobDefinition(original.name(), original.description(), original.kind(), original.target(),
+                original.inputFields(), original.prompt(), original.triggers(), "copilot", original.limits(),
+                original.overlap(), original.notifications(), original.enabled(), original.source());
+
+        assertThat(runtime.runSync(explicit, JobRequest.of(null, "manual")).status()).isEqualTo(DaemonTaskStatus.COMPLETED);
+        verify(factory).executeForResult(eq("summarize"), eq("analyst"), eq(ExecutionContext.DAEMON),
+                eq("copilot"), eq(0), any(), eq(0), eq(0), any());
     }
 
     @Test

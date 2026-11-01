@@ -384,6 +384,77 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    void zeroQueueCapacityUsesIdleSlotsWithoutAdmittingWaiters() throws Exception {
+        properties.setMaxConcurrent(1);
+        properties.setMaxQueued(0);
+        var started = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        runtime(100_000, executor(JobKind.JAVA, invocation -> {
+            started.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return ExecutionOutcome.ofText("done");
+        }));
+        var job = job("no-queue", JobKind.JAVA, LIMITS, Overlap.allow(3));
+        try {
+            var first = runtime.submit(job, JobRequest.of(null, "manual"));
+            assertThat(first.accepted()).isTrue();
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(runtime.waitingRuns()).isZero();
+            assertThat(runtime.submit(job, JobRequest.of(null, "manual")).status()).isEqualTo(DaemonTaskStatus.SKIPPED);
+            release.countDown();
+            await().atMost(Duration.ofSeconds(5)).until(() -> runtime.freeSlots() == 1);
+            assertThat(runtime.submit(job, JobRequest.of(null, "manual")).accepted()).isTrue();
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void nestedSpecialistIgnoringInterruptionKeepsItsSlotAndOverlap() {
+        properties.setMaxConcurrent(1);
+        properties.setMaxQueued(0);
+        properties.setCancelGraceMillis(10);
+        var release = new CountDownLatch(1);
+        var provider = mock(LlmProviderService.class);
+        org.springframework.ai.chat.model.ChatModel model = prompt -> {
+            while (release.getCount() > 0) {
+                try { release.await(); } catch (InterruptedException ignored) { }
+            }
+            return new org.springframework.ai.chat.model.ChatResponse(List.of(
+                    new org.springframework.ai.chat.model.Generation(new org.springframework.ai.chat.messages.AssistantMessage("done"))));
+        };
+        when(provider.resolve(any(), any())).thenReturn(model);
+        var loader = mock(ai.kukuvaia.agent.subagent.SubAgentSpecLoader.class);
+        when(loader.loadAll()).thenReturn(Map.of("target", new ai.kukuvaia.agent.subagent.SubAgentSpec(
+                "target", "test", null, null, "test", List.of(), null, 100, 1, 0.1, 1)));
+        var tools = mock(ai.kukuvaia.config.ToolRegistryConfig.class);
+        when(tools.resolveAll(any())).thenReturn(new org.springframework.ai.tool.ToolCallback[0]);
+        var meters = new SimpleMeterRegistry();
+        var factory = new SubAgentFactory(provider, new ai.kukuvaia.agent.subagent.SubAgentGuard(1),
+                new ai.kukuvaia.security.ToolResultSanitizingAdvisor(),
+                new ai.kukuvaia.provider.service.ProviderAuditLog(meters), tools, loader, meters);
+        runtime(100_000, new ai.kukuvaia.agent.daemon.exec.SpecialistExecutor(factory, properties));
+        var job = job("nested", JobKind.SPECIALIST, LIMITS, Overlap.skip());
+        try {
+            assertThat(runtime.runSync(job, JobRequest.of("test", "manual")).status()).isEqualTo(DaemonTaskStatus.TIMEOUT);
+            assertThat(runtime.freeSlots()).as("the nested model call is still alive").isZero();
+            assertThat(runtime.zombieRuns()).isEqualTo(1);
+            assertThat(runtime.submit(job, JobRequest.of("test", "manual")).accepted()).isFalse();
+            var other = job("other", JobKind.SPECIALIST, LIMITS, Overlap.skip());
+            assertThat(runtime.submit(other, JobRequest.of("test", "manual")).accepted()).isFalse();
+            release.countDown();
+            await().atMost(Duration.ofSeconds(5)).until(() -> runtime.freeSlots() == 1 && runtime.zombieRuns() == 0);
+        } finally {
+            release.countDown();
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(factory, "shutdown");
+        }
+    }
+
+    @Test
     @DisplayName("kill switch and disabled job → SKIPPED without running")
     void killSwitchAndDisabled() {
         AtomicInteger calls = new AtomicInteger();

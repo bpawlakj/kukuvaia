@@ -117,7 +117,9 @@ public class McpToolExecutor implements DaemonExecutor {
             try {
                 JsonNode tree = objectMapper.getObject().valueToTree(result.structuredContent());
                 if (tree.toString().length() <= MAX_OUTPUT_CHARS) {
-                    output = tree;
+                    ObjectMapper mapper = objectMapper.getObject();
+                    JsonNode redacted = mapper.valueToTree(redactStructured(mapper.treeToValue(tree, Object.class)));
+                    if (redacted.toString().length() <= MAX_OUTPUT_CHARS) output = redacted;
                 } else {
                     log.warn("MCP tool {}/{}: structured output above {} chars not stored", t.connection(), t.tool(), MAX_OUTPUT_CHARS);
                 }
@@ -133,6 +135,17 @@ public class McpToolExecutor implements DaemonExecutor {
         Map<String, Object> out = new LinkedHashMap<>();
         template.forEach((k, v) -> out.put(k, v instanceof String s ? PromptRenderer.render(s, fields) : v));
         return out;
+    }
+
+    private Object redactStructured(Object value) {
+        if (value instanceof String text) return sanitizer.redact(text);
+        if (value instanceof Map<?, ?> fields) {
+            Map<String, Object> redacted = new LinkedHashMap<>();
+            fields.forEach((key, child) -> redacted.put(sanitizer.redact(String.valueOf(key)), redactStructured(child)));
+            return redacted;
+        }
+        if (value instanceof List<?> values) return values.stream().map(this::redactStructured).toList();
+        return value;
     }
 
     private static String text(McpSchema.CallToolResult result) {

@@ -102,6 +102,17 @@ class ChatModelFactoryChatCompletionsTest {
     }
 
     @Test
+    void completionTokenCapReachesTheNativeChatCompletionsRequest() {
+        ChatModel chatModel = factory("test-key").create(provider(Map.of()), model());
+        chatModel.call(new Prompt("hi", org.springframework.ai.openai.OpenAiChatOptions.builder()
+                .maxCompletionTokens(32).build()));
+
+        var request = json.readTree(body.get());
+        assertThat(request.path("max_completion_tokens").asInt()).isEqualTo(32);
+        assertThat(request.has("max_tokens")).isFalse();
+    }
+
+    @Test
     @DisplayName("model defaults are merged under request options; extra-body, auth and headers reach the wire")
     void chatCompletions_mergesDefaultsAndSendsExtraBody() {
         ChatModel chatModel = factory("secret-key").create(provider(Map.of(

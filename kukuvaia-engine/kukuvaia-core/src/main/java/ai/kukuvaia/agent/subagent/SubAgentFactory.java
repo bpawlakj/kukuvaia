@@ -139,6 +139,14 @@ public class SubAgentFactory {
                                            ExecutionContext context, String providerOverride,
                                            int currentDepth, Collection<String> personaTools,
                                            int maxToolRoundsCap, int maxTokensCap) {
+        return executeForResult(task, specialistType, context, providerOverride, currentDepth, personaTools,
+                maxToolRoundsCap, maxTokensCap, null);
+    }
+
+    public SubAgentResult executeForResult(String task, String specialistType,
+                                           ExecutionContext context, String providerOverride,
+                                           int currentDepth, Collection<String> personaTools,
+                                           int maxToolRoundsCap, int maxTokensCap, ExecutionLifetime lifetime) {
         // Security: depth guard — prevent recursive spawning
         guard.validateDepth(currentDepth);
 
@@ -148,7 +156,7 @@ public class SubAgentFactory {
         String[] providerHolder = {"unresolved"};
         try {
             return runSpecialist(task, specialistType, context, providerOverride, personaTools,
-                    null, currentDepth, providerHolder, maxToolRoundsCap, maxTokensCap);
+                    null, currentDepth, providerHolder, maxToolRoundsCap, maxTokensCap, lifetime);
         } catch (SubAgentTimeoutException e) {
             status = "timeout";
             throw e;
@@ -185,7 +193,8 @@ public class SubAgentFactory {
 
         // Resolve available worker models for round-robin distribution
         // Context-aware: under DAEMON, Copilot-backed worker roles are excluded (opt-in only).
-        List<ChatModel> workerModels = providerService.resolveWorkerModels(context);
+        List<ChatModel> workerModels = providerOverride == null
+                ? providerService.resolveWorkerModels(context) : List.of();
         if (workerModels.isEmpty()) {
             log.warn("No worker models configured — falling back to default resolution per specialist");
         } else {
@@ -204,7 +213,7 @@ public class SubAgentFactory {
                 try {
                     String result = runSpecialist(task.task(), task.specialistType(),
                             context, providerOverride, personaTools, workerModel, 0,
-                            new String[]{"worker-pool"}, 0, 0).content();
+                            new String[]{"worker-pool"}, 0, 0, null).content();
                     long duration = System.currentTimeMillis() - start;
                     log.info("Worker '{}' completed in {}ms", task.specialistType(), duration);
                     return new WorkerResult(task.specialistType(),
@@ -242,7 +251,7 @@ public class SubAgentFactory {
                                          ExecutionContext context, String providerOverride,
                                          Collection<String> personaTools, ChatModel modelOverride,
                                          int currentDepth, String[] providerHolder, int maxToolRoundsCap,
-                                         int maxTokensCap) {
+                                         int maxTokensCap, ExecutionLifetime lifetime) {
         guard.validateDepth(currentDepth);
 
         SubAgentSpec spec = specs.get(specialistType);
@@ -263,8 +272,12 @@ public class SubAgentFactory {
             chatModel = modelOverride;
             resolvedProvider = providerHolder[0];
         } else {
-            String effectiveProvider = providerOverride != null ? providerOverride : spec.provider();
-            if (spec.tier() != null && !spec.tier().isBlank()) {
+            String effectiveProvider = providerOverride != null ? providerOverride
+                    : context == ExecutionContext.DAEMON ? null : spec.provider();
+            if (providerOverride != null) {
+                // The job's explicit provider is the trusted opt-in; a specialist tier must not replace it.
+                chatModel = providerService.resolve(providerOverride, context);
+            } else if (spec.tier() != null && !spec.tier().isBlank()) {
                 try {
                     // Context-aware: under DAEMON a Copilot-backed tier is refused (not an explicit opt-in).
                     chatModel = providerService.resolveByRole(spec.tier(), context);
@@ -289,7 +302,8 @@ public class SubAgentFactory {
         var toolLimiter = new ToolRoundLimiter(specialistType, maxToolRounds);
 
         // Isolated ChatClient. ToolCallingAdvisor is auto-registered by Spring AI 2.x.
-        ChatClient subAgent = ChatClient.builder(chatModel)
+        var meteredModel = new UsageTrackingModel(chatModel);
+        ChatClient subAgent = ChatClient.builder(meteredModel)
                 .defaultSystem(safePrompt)
                 .defaultAdvisors(
                         providerAuditLog,         // Provider/context/specialist + token metrics (finding #9)
@@ -302,8 +316,8 @@ public class SubAgentFactory {
                 ? spec.timeoutSeconds() : DEFAULT_TIMEOUT_SECONDS;
         var chatOptions = buildSubAgentOptions(spec, maxTokensCap);
 
-        Future<SubAgentResult> call = callExecutor.submit(() -> SubAgentResult.from(
-                subAgent.prompt()
+        java.util.concurrent.Callable<SubAgentResult> work = () -> {
+            SubAgentResult result = SubAgentResult.from(subAgent.prompt()
                         .options(chatOptions)
                         .user(task)
                         .advisors(advisorSpec -> advisorSpec.params(Map.of(
@@ -311,7 +325,11 @@ public class SubAgentFactory {
                                 "kukuvaia.executionContext", context.name(),
                                 "kukuvaia.specialist", specialistType
                         )))
-                        .call().chatResponse()));
+                        .call().chatResponse());
+            return new SubAgentResult(result.content(), result.promptTokens(), result.completionTokens(),
+                    result.usageReported() && meteredModel.complete, result.model());
+        };
+        Future<SubAgentResult> call = lifetime == null ? callExecutor.submit(work) : lifetime.submit(callExecutor, work);
         try {
             return call.get(timeoutSeconds, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
@@ -341,6 +359,28 @@ public class SubAgentFactory {
     /** Spec lookup for callers that need the specialist's limits (e.g. the daemon budget). */
     public java.util.Optional<SubAgentSpec> spec(String specialistType) {
         return java.util.Optional.ofNullable(specs.get(specialistType));
+    }
+
+    /** Spring AI's aggregate drops empty-usage rounds, so completeness must be checked before aggregation. */
+    private static final class UsageTrackingModel implements ChatModel {
+        private final ChatModel delegate;
+        private volatile boolean complete = true;
+
+        UsageTrackingModel(ChatModel delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public org.springframework.ai.chat.prompt.ChatOptions getOptions() {
+            return delegate.getOptions();
+        }
+
+        @Override
+        public org.springframework.ai.chat.model.ChatResponse call(org.springframework.ai.chat.prompt.Prompt prompt) {
+            var response = delegate.call(prompt);
+            if (!SubAgentResult.from(response).usageReported()) complete = false;
+            return response;
+        }
     }
 
     /**

@@ -3,15 +3,45 @@ package ai.kukuvaia.api;
 import ai.kukuvaia.mcp.McpConnection;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import ai.kukuvaia.mcp.McpConnectionsRepository;
+import ai.kukuvaia.mcp.McpConnectionsCache;
 
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.*;
 
 @DisplayName("McpConnectionsController — D5 review: SSRF guard, no literal secrets, masked responses")
 class McpConnectionsControllerValidationTest {
+
+    @ParameterizedTest
+    @ValueSource(strings = {"//169.254.169.254/latest/meta-data", "//other.example/mcp",
+            "///other.example/mcp", "/mcp\\other", "/mcp#fragment"})
+    void endpointsCannotOverrideValidatedOrigin(String endpoint) {
+        var repository = mock(McpConnectionsRepository.class);
+        var cache = mock(McpConnectionsCache.class);
+        var controller = new McpConnectionsController(repository, cache);
+
+        assertThat(controller.create(new McpConnectionsController.CreateRequest("mcp", "http://127.0.0.1:8765",
+                "/sse", Map.of(), true, null, McpConnection.STREAMABLE_HTTP, endpoint)).getStatusCode().value())
+                .isEqualTo(400);
+        assertThat(controller.update(UUID.randomUUID(), new McpConnectionsController.UpdateRequest(
+                null, endpoint, null, null, null, McpConnection.SSE, "/mcp")).getStatusCode().value())
+                .isEqualTo(400);
+        verifyNoInteractions(repository, cache);
+
+        assertThatThrownBy(() -> new McpConnection(UUID.randomUUID(), "mcp", "http://127.0.0.1:8765",
+                "/sse", Map.of(), true, null, Instant.now(), Instant.now(), McpConnection.STREAMABLE_HTTP, endpoint))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new McpConnection(UUID.randomUUID(), "mcp", "http://127.0.0.1:8765",
+                endpoint, Map.of(), true, null, Instant.now(), Instant.now()))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     @DisplayName("url: http(s) only, link-local / any-local addresses (cloud metadata) refused")

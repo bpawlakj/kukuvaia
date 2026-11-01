@@ -7,6 +7,8 @@ import tools.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -76,6 +78,47 @@ class OpenAiResponsesTransportTest {
         lenient().when(response.body()).thenReturn(body);
         when(httpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
                 .thenReturn(response);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void requestOutputLimitReachesNativeWireBody(boolean completionOption) throws Exception {
+        stubResponse(200, "{\"id\":\"r\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}");
+        var options = org.springframework.ai.openai.OpenAiChatOptions.builder();
+        if (completionOption) options.maxCompletionTokens(32); else options.maxTokens(32);
+
+        transport.call(new Prompt("hi", options.build()));
+
+        var sent = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(httpClient).send(sent.capture(), any(HttpResponse.BodyHandler.class));
+        assertThat(new ObjectMapper().readTree(extractBody(sent.getValue())).path("max_output_tokens").asInt()).isEqualTo(32);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nativeToolRoundsKeepUsageTotalsAndCompleteness(boolean firstMetered) throws Exception {
+        String first = "{\"id\":\"r1\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"}]"
+                + (firstMetered ? ",\"usage\":{\"input_tokens\":80,\"output_tokens\":20}" : "") + "}";
+        scriptResponses(first, "{\"id\":\"r2\",\"output\":[],\"usage\":{\"input_tokens\":8,\"output_tokens\":2}}");
+        var tool = recordingCallback("f", new AtomicInteger(), "ok");
+
+        var result = transport.call(promptWithTool("hi", tool));
+
+        assertThat(result.getMetadata().getUsage().getTotalTokens()).isEqualTo(firstMetered ? 110 : 10);
+        assertThat((Boolean) result.getMetadata().get(ai.kukuvaia.provider.transport.TransportUsage.COMPLETE))
+                .isEqualTo(firstMetered);
+    }
+
+    @Test
+    void nativeToolLoopPropagatesGuardrailAbortBeforeAnotherHttpRound() throws Exception {
+        scriptResponses("{\"id\":\"r\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"}]}");
+        ToolCallback abort = new ToolCallback() {
+            public ToolDefinition getToolDefinition() { return ToolDefinition.builder().name("f").description("f").inputSchema("{}").build(); }
+            public String call(String input) { throw new ai.kukuvaia.provider.transport.ToolCallAbortedException("limit reached"); }
+        };
+        assertThatThrownBy(() -> transport.call(promptWithTool("hi", abort)))
+                .isInstanceOf(ai.kukuvaia.provider.transport.ToolCallAbortedException.class);
+        verify(httpClient, times(1)).send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class));
     }
 
     @Test

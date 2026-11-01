@@ -108,7 +108,8 @@ final class AnthropicMessagesMapper {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model.modelId());
 
-        int maxTokens = model.maxTokens() > 0 ? model.maxTokens() : DEFAULT_MAX_TOKENS;
+        int maxTokens = ai.kukuvaia.provider.transport.OutputTokenLimits.effective(prompt,
+                model.maxTokens() > 0 ? model.maxTokens() : DEFAULT_MAX_TOKENS);
         body.put("max_tokens", maxTokens);
 
         String system = extractSystemPrompt(prompt);

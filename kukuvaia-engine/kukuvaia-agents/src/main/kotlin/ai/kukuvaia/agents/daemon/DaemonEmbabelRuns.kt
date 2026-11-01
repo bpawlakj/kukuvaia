@@ -24,6 +24,8 @@ class DaemonEmbabelRuns(private val platform: ObjectProvider<AgentPlatform>) {
         val copilotAllowed: Boolean,
         val deadline: Instant = Instant.MAX,
         val tokenBudget: Int = Int.MAX_VALUE,
+        val maxTokens: Int = 0,
+        val lifetime: ai.kukuvaia.agent.subagent.ExecutionLifetime? = null,
     ) {
         /** Set by the guard when it refused a model — the executor then stops the process (Embabel would retry). */
         @Volatile var refusal: String? = null

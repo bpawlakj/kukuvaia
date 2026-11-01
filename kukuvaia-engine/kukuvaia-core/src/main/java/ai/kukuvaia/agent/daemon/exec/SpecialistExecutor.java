@@ -44,7 +44,7 @@ public class SpecialistExecutor implements DaemonExecutor {
     public ExecutionOutcome execute(JobInvocation invocation, JobLimits limits) {
         SubAgentResult run = subAgentFactory.executeForResult(invocation.prompt(), invocation.target(),
                 ExecutionContext.DAEMON, invocation.provider(), 0, properties.toolScopeOrNull(),
-                limits.maxToolRounds(), limits.maxTokens());
+                limits.maxToolRounds(), limits.maxTokens(), invocation.lifetime());
         return new ExecutionOutcome(run.content(), null, run.promptTokens(), run.completionTokens(),
                 run.usageReported(), invocation.provider() != null ? invocation.provider() : "daemon-default", run.model());
     }

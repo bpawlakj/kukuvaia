@@ -81,7 +81,7 @@ public final class ToolRoundLimiter {
     }
 
     /** Ends the sub-agent call: thrown through Spring AI's tool loop (not a ToolExecutionException). */
-    public static final class ToolBudgetExceededException extends IllegalStateException {
+    public static final class ToolBudgetExceededException extends ai.kukuvaia.provider.transport.ToolCallAbortedException {
         public ToolBudgetExceededException(String message) {
             super(message);
         }

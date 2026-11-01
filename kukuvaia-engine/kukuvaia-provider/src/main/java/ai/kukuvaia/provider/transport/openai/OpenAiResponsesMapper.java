@@ -92,7 +92,7 @@ final class OpenAiResponsesMapper {
         body.put("model", model.modelId());
         body.put("input", buildInput(prompt));
 
-        Integer maxTokens = model.maxTokens();
+        Integer maxTokens = ai.kukuvaia.provider.transport.OutputTokenLimits.effective(prompt, model.maxTokens());
         if (maxTokens != null && maxTokens > 0) body.put("max_output_tokens", maxTokens);
 
         Map<String, Object> config = model.config() == null ? Map.of() : model.config();

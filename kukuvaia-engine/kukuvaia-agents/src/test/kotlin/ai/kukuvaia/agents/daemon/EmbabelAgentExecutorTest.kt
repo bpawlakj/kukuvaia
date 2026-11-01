@@ -200,6 +200,54 @@ class EmbabelAgentExecutorTest {
     }
 
     @Test
+    fun perCallOutputCapPreservesProviderOptions() {
+        var seen: Prompt? = null
+        val defaults = org.springframework.ai.openai.OpenAiChatOptions.builder()
+            .model("stub-model").temperature(0.4).maxTokens(8192).build()
+        val raw = object : ChatModel {
+            override fun getOptions() = defaults
+            override fun call(prompt: Prompt): ChatResponse {
+                seen = prompt
+                return usageModel(10).call(prompt)
+            }
+        }
+        CopilotAgent.model = GuardedChatModel("worker", raw, copilot = false, runs = runs, meterRegistry = null)
+
+        executor.execute(invocation("CopilotAgent"), limits().withMaxTokens(32))
+
+        assertEquals(32, seen?.options?.maxTokens)
+        assertEquals("stub-model", seen?.options?.model)
+        assertEquals(0.4, seen?.options?.temperature)
+        assertEquals(8192, defaults.maxTokens, "the shared model defaults must not be mutated")
+    }
+
+    @Test
+    fun timedOutProcessKeepsItsLifetimeUntilTheModelActuallyReturns() {
+        val release = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val raw = ChatModel { prompt ->
+            started.countDown()
+            while (release.count > 0) {
+                try { release.await() } catch (_: InterruptedException) { }
+            }
+            usageModel(10).call(prompt)
+        }
+        CopilotAgent.model = GuardedChatModel("worker", raw, copilot = false, runs = runs, meterRegistry = null)
+        val invocation = invocation("CopilotAgent", timeout = Duration.ofSeconds(2))
+        try {
+            val error = assertFailsWith<ExecutionFailedException> { executor.execute(invocation, limits()) }
+            assertTrue(error.timedOut())
+            assertEquals(0, started.count, "the blocking model must have started")
+            invocation.lifetime().close()
+            assertEquals(false, invocation.lifetime().await(10), "an active model must retain the daemon slot")
+        } finally {
+            release.countDown()
+            invocation.lifetime().close()
+        }
+        assertTrue(invocation.lifetime().await(5000))
+    }
+
+    @Test
     @DisplayName("D4 review #4: stored error is a fixed text — no exception message / prompt content")
     fun errorTextFixed() {
         val e = assertFailsWith<ExecutionFailedException> { executor.execute(invocation("LeakyAgent", "TOPSECRET-42"), limits()) }

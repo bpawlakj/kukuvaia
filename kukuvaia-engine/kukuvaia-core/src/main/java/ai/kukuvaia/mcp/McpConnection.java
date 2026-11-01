@@ -1,6 +1,7 @@
 package ai.kukuvaia.mcp;
 
 import java.time.Instant;
+import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
@@ -44,7 +45,9 @@ public record McpConnection(
             throw new IllegalArgumentException("transport must be 'sse' or 'streamable-http'");
         }
         endpoint = endpoint == null || endpoint.isBlank() ? "/mcp" : endpoint;
-        if (!endpoint.startsWith("/")) throw new IllegalArgumentException("endpoint must start with '/'");
+        if (!isOriginRelativePath(endpoint) || !isOriginRelativePath(sseEndpoint)) {
+            throw new IllegalArgumentException("MCP endpoints must be origin-relative paths without an authority or fragment");
+        }
     }
 
     /** SSE connection (pre-V25 shape). */
@@ -55,5 +58,16 @@ public record McpConnection(
 
     public boolean isStreamableHttp() {
         return STREAMABLE_HTTP.equals(transport);
+    }
+
+    /** A leading slash alone is insufficient: URI resolution treats //host/path as a new authority. */
+    public static boolean isOriginRelativePath(String path) {
+        if (path == null || !path.startsWith("/") || path.startsWith("//") || path.length() > 100) return false;
+        try {
+            URI uri = URI.create(path);
+            return !uri.isAbsolute() && uri.getRawAuthority() == null && uri.getRawFragment() == null;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 }

@@ -160,14 +160,14 @@ public class McpConnectionsController {
     }
 
     private static boolean validPath(String path) {
-        return path == null || (path.startsWith("/") && path.length() <= 100);
+        return path == null || McpConnection.isOriginRelativePath(path);
     }
 
     /** {@code null} = keep / default; otherwise {@code sse | streamable-http}, endpoint a path. */
     private static boolean validTransport(String transport, String endpoint) {
         boolean transportOk = transport == null
                 || McpConnection.SSE.equals(transport) || McpConnection.STREAMABLE_HTTP.equals(transport);
-        boolean endpointOk = endpoint == null || (endpoint.startsWith("/") && endpoint.length() <= 100);
+        boolean endpointOk = validPath(endpoint);
         return transportOk && endpointOk;
     }
 
