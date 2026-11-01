@@ -1,11 +1,11 @@
 ---
 id: T-014
 title: "McpToolExecutor (kind: mcp)"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 4886f99
 depends_on: [T-005, T-013]
 blocks: [T-016]
 plan_anchor: d5--external-agents-mcp-now-a2a-spike

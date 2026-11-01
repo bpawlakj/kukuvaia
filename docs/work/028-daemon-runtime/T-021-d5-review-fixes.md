@@ -1,11 +1,11 @@
 ---
 id: T-021
 title: "Follow-up to T-013, T-014: close D5 security-review findings"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 6898979
 depends_on: [T-013, T-014]
 blocks: [T-016]
 plan_anchor: d5--external-agents-mcp-now-a2a-spike

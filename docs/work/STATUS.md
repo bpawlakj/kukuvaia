@@ -6,9 +6,7 @@
 
 ## Active
 
-| ID | Initiative | Tasks (done/total) | Updated |
-|----|------------|---------------------|---------|
-| 028 | [daemon-runtime](028-daemon-runtime/) | 17/20 | 2026-11-01 |
+_None._
 
 ## Backlog
 
@@ -44,7 +42,9 @@
 
 ## Done
 
-_None._
+| ID | Initiative | Tasks | Closed |
+|----|------------|-------|--------|
+| 028 | [daemon-runtime](028-daemon-runtime/) | 21/21 | 2026-11-01 |
 
 ## Obsoleted
 

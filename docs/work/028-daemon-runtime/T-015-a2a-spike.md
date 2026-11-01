@@ -1,11 +1,11 @@
 ---
 id: T-015
 title: "A2A spike → go/no-go for A2aExecutor"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 23d279d
 depends_on: [T-005]
 blocks: []
 plan_anchor: d5--external-agents-mcp-now-a2a-spike

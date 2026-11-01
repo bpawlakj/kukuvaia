@@ -1,11 +1,11 @@
 ---
 id: T-016
 title: "Docs: daemon-runtime.md, orchestration decisions, security-review statuses"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: e6e832e
 depends_on: [T-007, T-009, T-010, T-011, T-012, T-014]
 blocks: []
 plan_anchor: critical-files
