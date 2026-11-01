@@ -115,4 +115,15 @@ class DaemonJobParserTest {
                 .isEqualTo("CI failed on hub ${event.payload}");
         assertThat(PromptRenderer.invalidPlaceholders("{{fields.a}} {{fields.b}}", Set.of("a"))).containsExactly("{{fields.b}}");
     }
+
+    @Test
+    @DisplayName("input.match must reference declared fields and list values")
+    void inputMatch() {
+        var d = parse("name: x1\nkind: java\ntarget: t\ninput: { fields: [status], match: { status: [failed, error] } }\n");
+        assertThat(d.inputMatch()).containsEntry("status", java.util.List.of("failed", "error"));
+        assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\ninput: { fields: [a], match: { b: [x] } }\n"))
+                .hasMessageContaining("not a declared input field");
+        assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\ninput: { fields: [a], match: { a: [] } }\n"))
+                .hasMessageContaining("at least one value");
+    }
 }

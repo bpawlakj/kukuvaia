@@ -132,7 +132,7 @@ public class DaemonJobRegistry {
         return null;
     }
 
-    static List<Map.Entry<String, String>> loadSources(Optional<Path> projectExtensionRoot) {
+    public static List<Map.Entry<String, String>> loadSources(Optional<Path> projectExtensionRoot) {
         List<Map.Entry<String, String>> sources = new ArrayList<>();
         try {
             Resource[] builtIns = new PathMatchingResourcePatternResolver().getResources("classpath*:daemon/*.yaml");

@@ -80,6 +80,7 @@ public final class DaemonJobParser {
         }
         String target = parseTarget(source, kind, doc.get("target"));
         List<String> fields = parseFields(source, doc.get("input"));
+        Map<String, List<String>> match = parseMatch(source, doc.get("input"), fields);
         String prompt = optionalString(source, doc, "prompt");
         Set<String> invalid = PromptRenderer.invalidPlaceholders(prompt, new HashSet<>(fields));
         if (!invalid.isEmpty()) {
@@ -95,7 +96,7 @@ public final class DaemonJobParser {
         String description = optionalString(source, doc, "description");
 
         return new DaemonJobDefinition(name, description, kind, target, fields, prompt, triggers, provider,
-                limits, overlap, notify.isEmpty() ? List.of("log") : notify, enabled, source);
+                limits, overlap, notify.isEmpty() ? List.of("log") : notify, enabled, source, match);
     }
 
     private static String parseTarget(String source, JobKind kind, Object raw) {
@@ -123,8 +124,26 @@ public final class DaemonJobParser {
             fail(source, "input must be a map with 'fields'");
             return List.of();
         }
-        rejectUnknown(source, "input.", keys(map), Set.of("fields"));
+        rejectUnknown(source, "input.", keys(map), Set.of("fields", "match"));
         return parseStringList(source, map.get("fields"), "input.fields", FIELD);
+    }
+
+    private static Map<String, List<String>> parseMatch(String source, Object input, List<String> fields) {
+        if (!(input instanceof Map<?, ?> map) || map.get("match") == null) return Map.of();
+        if (!(map.get("match") instanceof Map<?, ?> match)) {
+            fail(source, "input.match must be a map of field -> list of values");
+            return Map.of();
+        }
+        Map<String, List<String>> out = new java.util.LinkedHashMap<>();
+        for (var entry : match.entrySet()) {
+            String field = String.valueOf(entry.getKey());
+            if (!fields.contains(field)) fail(source, "input.match field '" + field + "' is not a declared input field");
+            List<String> values = parseStringList(source, entry.getValue(), "input.match." + field,
+                    Pattern.compile("[A-Za-z0-9_.-]{1,64}"));
+            if (values.isEmpty()) fail(source, "input.match." + field + " needs at least one value");
+            out.put(field, values);
+        }
+        return out;
     }
 
     private static List<DaemonTrigger> parseTriggers(String source, Object raw) {

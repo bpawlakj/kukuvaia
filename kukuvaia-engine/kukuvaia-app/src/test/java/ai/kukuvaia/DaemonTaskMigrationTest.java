@@ -1,6 +1,5 @@
 package ai.kukuvaia;
 
-import ai.kukuvaia.agent.daemon.DaemonAgentService;
 import ai.kukuvaia.agent.daemon.DaemonBudgetGuard;
 import ai.kukuvaia.agent.daemon.DaemonScheduleGuard;
 import ai.kukuvaia.agent.daemon.NotificationSanitizer;
@@ -63,18 +62,33 @@ class DaemonTaskMigrationTest {
         var runtime = new DaemonRuntime(List.of(new SpecialistExecutor(specialists, properties)), budget,
                 new DaemonScheduleGuard(), new DaemonTaskStore(jdbc), properties, new ErrorSanitizer(),
                 new SimpleMeterRegistry());
-        var daemon = new DaemonAgentService(runtime, specialists);
-        var mvc = MockMvcBuilders.standaloneSetup(new WebhookController(daemon,
+        when(specialists.availableSpecialists()).thenReturn(java.util.Set.of("analyst"));
+        // The real built-in YAML jobs (classpath:daemon/*.yaml) drive the webhook routes.
+        var registry = new ai.kukuvaia.agent.daemon.def.DaemonJobRegistry(
+                List.of(new SpecialistExecutor(specialists, properties)),
+                ai.kukuvaia.agent.daemon.def.DaemonJobRegistry.loadSources(java.util.Optional.empty()));
+        assertThat(registry.rejected()).isEmpty();
+        var mvc = MockMvcBuilders.standaloneSetup(new WebhookController(registry, runtime,
                         new PayloadSanitizer(new ObjectMapper())))
                 .addFilters(new WebhookRateLimiter(10, 100), new WebhookAuthFilter("", "test-token", true))
                 .build();
 
+        // Non-failure events are ignored by the job's input.match filter (no task row).
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
-                        .content("{\"repo\":\"test\",\"status\":\"failed\"}"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("COMPLETED"));
+                        .content("{\"repo\":\"test\",\"status\":\"passed\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.action").value("ignored"));
 
+        // Asynchronous: 202 + task id immediately, the row completes in the background.
+        mvc.perform(post("/api/webhooks/ci").contentType("application/json")
+                        .header("Authorization", "Bearer test-token")
+                        .content("{\"repo\":\"test\",\"status\":\"failed\",\"secret\":\"never-in-prompt\"}"))
+                .andExpect(status().isAccepted()).andExpect(jsonPath("$.status").value("QUEUED"));
         Long taskId = jdbc.queryForObject("SELECT id FROM kukuvaia_agent.daemon_tasks", Long.class);
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).until(() -> "COMPLETED".equals(
+                jdbc.queryForObject("SELECT status FROM kukuvaia_agent.daemon_tasks WHERE id = ?", String.class, taskId)));
+        assertThat(jdbc.queryForObject("SELECT prompt FROM kukuvaia_agent.daemon_tasks WHERE id = ?",
+                String.class, taskId)).contains("repo: test").doesNotContain("never-in-prompt");
         assertThat(jdbc.queryForObject("SELECT result FROM kukuvaia_agent.daemon_tasks WHERE id = ?",
                 String.class, taskId)).isEqualTo("Build failure analyzed");
         assertThat(jdbc.queryForObject("SELECT completed_at IS NOT NULL AND duration_ms >= 0 "
@@ -90,9 +104,14 @@ class DaemonTaskMigrationTest {
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
                         .content("{\"repo\":\"test\",\"status\":\"failed\"}"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("FAILED"));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM kukuvaia_agent.daemon_tasks "
-                + "WHERE status = 'FAILED' AND completed_at IS NOT NULL", Integer.class)).isEqualTo(1);
+                .andExpect(status().isAccepted());
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).until(() ->
+                jdbc.queryForObject("SELECT COUNT(*) FROM kukuvaia_agent.daemon_tasks "
+                        + "WHERE status = 'FAILED' AND completed_at IS NOT NULL", Integer.class) == 1);
+        // Unknown routes are 404 (after authentication).
+        mvc.perform(post("/api/webhooks/nope").contentType("application/json")
+                        .header("Authorization", "Bearer test-token").content("{}"))
+                .andExpect(status().isNotFound());
         assertThat(jdbc.queryForObject("SELECT to_regclass('kukuvaia.daemon_tasks') IS NULL", Boolean.class))
                 .isTrue();
     }

@@ -4,6 +4,8 @@ import ai.kukuvaia.agent.daemon.exec.JobKind;
 import ai.kukuvaia.agent.daemon.exec.JobLimits;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * A daemon job: what runs ({@code kind} + {@code target}), on what input, under which limits.
@@ -15,11 +17,13 @@ import java.util.List;
  * @param provider    explicit provider (the only way to opt in to Copilot), or {@code null}
  * @param notifications notification sink names ({@code log}, {@code webhook}, …)
  * @param source      where the definition came from (classpath file, project file, "adhoc")
+ * @param inputMatch  optional filter: the run only starts if each listed field has one of the values
+ *                    (case-insensitive), e.g. {@code status: [failed, error]}
  */
 public record DaemonJobDefinition(String name, String description, JobKind kind, String target,
                                   List<String> inputFields, String prompt, List<DaemonTrigger> triggers,
                                   String provider, JobLimits limits, Overlap overlap, List<String> notifications,
-                                  boolean enabled, String source) {
+                                  boolean enabled, String source, Map<String, List<String>> inputMatch) {
 
     public DaemonJobDefinition {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("job name is required");
@@ -31,6 +35,27 @@ public record DaemonJobDefinition(String name, String description, JobKind kind,
         if (limits == null) limits = JobLimits.defaults();
         if (overlap == null) overlap = Overlap.skip();
         if (description == null) description = "";
+        inputMatch = inputMatch == null ? Map.of() : Map.copyOf(inputMatch);
+    }
+
+    public DaemonJobDefinition(String name, String description, JobKind kind, String target,
+                               List<String> inputFields, String prompt, List<DaemonTrigger> triggers,
+                               String provider, JobLimits limits, Overlap overlap, List<String> notifications,
+                               boolean enabled, String source) {
+        this(name, description, kind, target, inputFields, prompt, triggers, provider, limits, overlap,
+                notifications, enabled, source, Map.of());
+    }
+
+    /** Whether sanitized input fields satisfy {@link #inputMatch()} (always true without a filter). */
+    public boolean matches(Map<String, String> fields) {
+        for (var condition : inputMatch.entrySet()) {
+            String value = fields.get(condition.getKey());
+            if (value == null || condition.getValue().stream()
+                    .noneMatch(v -> v.equalsIgnoreCase(value.trim()))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Ad-hoc specialist job (used by the {@code DaemonAgentService} facade). */

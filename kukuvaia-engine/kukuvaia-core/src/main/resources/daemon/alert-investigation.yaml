@@ -1,0 +1,26 @@
+# Built-in daemon job: investigate a monitoring alert.
+# Trigger: POST /api/webhooks/alert. Previously targeted a non-existent "devops" specialist and always
+# failed; it now uses the analyst specialist.
+name: alert-investigation
+description: Investigate a monitoring alert and report findings
+kind: specialist
+target: analyst
+input:
+  fields: [alert_name, severity, service, description, timestamp]
+prompt: |
+  Monitoring alert received. Event data:
+  - alert: {{fields.alert_name}}
+  - severity: {{fields.severity}}
+  - service: {{fields.service}}
+  - description: {{fields.description}}
+  - timestamp: {{fields.timestamp}}
+
+  Investigate using available tools and report findings.
+triggers:
+  - webhook: alert
+  - manual: true
+limits:
+  timeout: 125s
+  max_tokens: 4096
+overlap: skip
+notify: [log]
