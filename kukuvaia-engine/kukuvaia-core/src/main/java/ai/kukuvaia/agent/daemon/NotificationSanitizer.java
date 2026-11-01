@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 public class NotificationSanitizer {
 
     private static final int MAX_SUMMARY_LENGTH = 200;
+    private static final ai.kukuvaia.security.ErrorSanitizer REDACTOR = new ai.kukuvaia.security.ErrorSanitizer();
 
     /**
      * Create a safe notification payload for external sinks.
@@ -27,15 +28,17 @@ public class NotificationSanitizer {
                 result.provider(),
                 result.durationMs(),
                 result.tokenUsage(),
-                truncateSummary(result.result()),
+                truncateSummary(result.result() != null && !result.result().isBlank() ? result.result() : result.error()),
                 result.triggerSource()
         );
     }
 
-    private String truncateSummary(String fullResult) {
-        if (fullResult == null || fullResult.isBlank()) {
+    private String truncateSummary(String text) {
+        if (text == null || text.isBlank()) {
             return "(no output)";
         }
+        // Strip connection strings, tokens, paths etc. even from model output before it leaves the process.
+        String fullResult = REDACTOR.sanitize(text);
         // Take first line or first N chars — never full result
         String firstLine = fullResult.lines().findFirst().orElse("");
         if (firstLine.length() > MAX_SUMMARY_LENGTH) {

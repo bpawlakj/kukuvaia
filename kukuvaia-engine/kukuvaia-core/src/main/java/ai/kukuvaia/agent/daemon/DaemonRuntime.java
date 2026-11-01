@@ -126,6 +126,26 @@ public class DaemonRuntime {
         }
     }
 
+    /** Optional: notifications for finished runs ({@code notify:} sinks). */
+    private volatile ai.kukuvaia.agent.daemon.notify.DaemonNotifier notifier;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setNotifier(ai.kukuvaia.agent.daemon.notify.DaemonNotifier notifier) {
+        this.notifier = notifier;
+    }
+
+    private DaemonTaskResult notified(DaemonJobDefinition job, DaemonTaskResult result) {
+        var n = notifier;
+        if (n != null) {
+            try {
+                n.notifyFinished(job, result);
+            } catch (RuntimeException e) {
+                log.warn("Notification for task {} failed: {}", result.taskId(), e.getMessage());
+            }
+        }
+        return result;
+    }
+
     @PreDestroy
     void shutdown() {
         dispatcher.shutdownNow();
@@ -342,8 +362,10 @@ public class DaemonRuntime {
             } else {
                 log.warn("Daemon job '{}' ended {} after {}ms (task #{}): {}", job.name(), status, durationMs, taskId, error);
             }
+            DaemonTaskResult result = notified(job,
+                    terminal(taskId, job, request, status, outcome, error, charge, durationMs, startedAt, Instant.now()));
             if (interrupted) Thread.currentThread().interrupt();
-            return terminal(taskId, job, request, status, outcome, error, charge, durationMs, startedAt, Instant.now());
+            return result;
         } catch (RuntimeException | Error e) {
             // Infrastructure failure (e.g. markRunning). Record as FAILED, keep tokens safe.
             long durationMs = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
@@ -358,7 +380,8 @@ public class DaemonRuntime {
             }
             recordMetrics(job, DaemonTaskStatus.FAILED, durationMs);
             if (e instanceof Error err) throw err;
-            return terminal(taskId, job, request, DaemonTaskStatus.FAILED, null, error, 0, durationMs, startedAt, Instant.now());
+            return notified(job,
+                    terminal(taskId, job, request, DaemonTaskStatus.FAILED, null, error, 0, durationMs, startedAt, Instant.now()));
         } finally {
             releaseWhenWorkEnds(job, taskId, callDone, haveSlot, admission.releaseOverlap());
         }

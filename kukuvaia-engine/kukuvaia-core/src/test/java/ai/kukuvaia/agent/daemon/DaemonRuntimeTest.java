@@ -213,6 +213,27 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    @DisplayName("T-011: finished runs are notified; a failing sink never changes the run's status")
+    void notification_failureDoesNotFailTask() {
+        runtime(100_000, executor(JobKind.JAVA, inv -> ExecutionOutcome.ofText("all good")));
+        var seen = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        ai.kukuvaia.agent.daemon.notify.NotificationSink failing = new ai.kukuvaia.agent.daemon.notify.NotificationSink() {
+            public String name() { return "log"; }
+            public void send(NotificationSanitizer.NotificationPayload p) {
+                seen.add(p.status());
+                throw new IllegalStateException("sink down");
+            }
+        };
+        runtime.setNotifier(new ai.kukuvaia.agent.daemon.notify.DaemonNotifier(List.of(failing), new NotificationSanitizer()));
+
+        DaemonTaskResult r = runtime.runSync(job("j", JobKind.JAVA, LIMITS, Overlap.skip()), JobRequest.of(null, "m"));
+
+        assertThat(r.status()).isEqualTo(DaemonTaskStatus.COMPLETED);
+        assertThat(store.status.get(r.taskId())).isEqualTo("COMPLETED");
+        assertThat(seen).containsExactly("COMPLETED");
+    }
+
+    @Test
     @DisplayName("error text is sanitized before it is stored")
     void error_sanitized() {
         runtime(100_000, executor(JobKind.JAVA, inv -> {
