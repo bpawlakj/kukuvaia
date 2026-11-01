@@ -14,16 +14,15 @@ dependencies {
     implementation project(':kukuvaia-memory')
 
     // Embabel Agent Framework
-    implementation 'com.embabel.agent:embabel-agent-starter:0.3.4'
-    implementation 'com.embabel.common:embabel-common-ai:0.1.6'
+    implementation 'com.embabel.agent:embabel-agent-starter:1.5.4'
 
     implementation 'org.jetbrains.kotlin:kotlin-stdlib'
     implementation 'org.jetbrains.kotlin:kotlin-reflect'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.jetbrains.kotlin:kotlin-test-junit5'
-    testImplementation 'com.embabel.agent:embabel-agent-test:0.3.4'
-    testImplementation 'org.mockito.kotlin:mockito-kotlin:5.4.0'
+    testImplementation 'com.embabel.agent:embabel-agent-test:1.5.4'
+    testImplementation 'org.mockito.kotlin:mockito-kotlin:6.4.0'
 }
 
 tasks.named('test') {

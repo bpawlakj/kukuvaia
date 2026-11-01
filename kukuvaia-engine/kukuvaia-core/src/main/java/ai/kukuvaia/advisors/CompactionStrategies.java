@@ -1,9 +1,9 @@
 package ai.kukuvaia.advisors;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -252,7 +252,7 @@ final class CompactionStrategies {
                 canonicalArgs = MAPPER.writeValueAsString(plain);
                 if (node.isObject()) {
                     argsKeys = new HashSet<>();
-                    node.fieldNames().forEachRemaining(argsKeys::add);
+                    argsKeys.addAll(node.propertyNames());
                 }
             } catch (Exception e) {
                 canonicalArgs = rawArgs;
@@ -409,7 +409,7 @@ final class CompactionStrategies {
             JsonNode node = MAPPER.readTree(argsJson);
             if (!node.isObject()) return Set.of();
             Set<String> keys = new HashSet<>();
-            node.fieldNames().forEachRemaining(keys::add);
+            keys.addAll(node.propertyNames());
             return keys;
         } catch (Exception e) {
             return Set.of();

@@ -206,8 +206,7 @@ The engine reads these at startup. For local development, put them in `kukuvaia-
 | `LLM_MODEL_DISPLAY` | `Claude Sonnet 4.6` | Human-readable model label |
 | `LLM_MODEL_TIER` | `standard` | Routing tier hint |
 | `LLM_MAX_TOKENS` | `8096` | Max output tokens per request |
-| `LLM_CONNECT_TIMEOUT` | `10s` | Connect timeout |
-| `LLM_READ_TIMEOUT` | `120s` | Read timeout |
+| `LLM_CONNECT_TIMEOUT_SECONDS` | `10` | TCP connect timeout (seconds) for LLM provider calls |
 | `OPENAI_EMBEDDING_ENABLED` | `false` | If `true`, uses remote embeddings; else local ONNX (MiniLM-L6-v2) |
 | `MEMORY_CONSOLIDATION_CRON` | `0 0 3 * * *` | Nightly memory consolidation schedule |
 | `WEBHOOK_SECRET` | _(empty)_ | HMAC-SHA256 secret for `/api/webhooks/*` |

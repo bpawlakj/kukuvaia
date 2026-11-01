@@ -2,7 +2,7 @@ package ai.kukuvaia.extensions;
 
 import ai.kukuvaia.scripting.LuaSandbox;
 import ai.kukuvaia.scripting.PipelineEngine;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;

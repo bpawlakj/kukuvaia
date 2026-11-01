@@ -2,6 +2,7 @@ package ai.kukuvaia.agents.config
 
 import ai.kukuvaia.provider.config.LlmProvidersProperties
 import ai.kukuvaia.provider.service.ChatModelCache
+import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.common.ai.model.*
 import org.slf4j.LoggerFactory
 import org.springframework.ai.chat.model.ChatModel
@@ -48,7 +49,7 @@ class EmbabelModelBridgeConfig(
             return
         }
 
-        val llms = mutableListOf<Llm>()
+        val llms = mutableListOf<SpringAiLlmService>()
         val roleMap = mutableMapOf<String, String>()
         var defaultLlmName: String? = null
 
@@ -74,31 +75,31 @@ class EmbabelModelBridgeConfig(
         }
     }
 
-    private fun createLlm(name: String, chatModel: ChatModel): Llm = Llm(
-        name, "kukuvaia", chatModel, DefaultOptionsConverter, null, listOf(), null,
-    )
+    // Embabel 1.5 replaced the deprecated `Llm` class with `SpringAiLlmService`.
+    private fun createLlm(name: String, chatModel: ChatModel): SpringAiLlmService =
+        SpringAiLlmService(name, "kukuvaia", chatModel, DefaultOptionsConverter)
 }
 
 /**
  * ModelProvider that tolerates empty state and supports runtime updates.
  */
 class KukuvaiaModelProvider(
-    private val fallbackLlm: Llm?,
+    private val fallbackLlm: SpringAiLlmService?,
 ) : ModelProvider {
 
     private val log = LoggerFactory.getLogger(KukuvaiaModelProvider::class.java)
 
-    @Volatile private var llmsByName: Map<String, Llm> = emptyMap()
+    @Volatile private var llmsByName: Map<String, SpringAiLlmService> = emptyMap()
     @Volatile private var roleMap: Map<String, String> = emptyMap()
     @Volatile private var defaultLlmName: String? = null
 
-    fun updateModels(llms: List<Llm>, roles: Map<String, String>, defaultLlm: String) {
+    fun updateModels(llms: List<SpringAiLlmService>, roles: Map<String, String>, defaultLlm: String) {
         llmsByName = llms.associateBy { it.name }
         roleMap = roles
         defaultLlmName = defaultLlm
     }
 
-    override fun getLlm(criteria: ModelSelectionCriteria): Llm {
+    override fun getLlm(criteria: ModelSelectionCriteria): SpringAiLlmService {
         val models = llmsByName
         if (models.isEmpty()) {
             if (fallbackLlm != null) return fallbackLlm
@@ -124,10 +125,10 @@ class KukuvaiaModelProvider(
         throw NoSuitableModelException(criteria, emptyList())
     }
 
-    override fun listRoles(type: Class<out AiModel<*>>): List<String> =
+    override fun listRoles(modelClass: Class<*>): List<String> =
         roleMap.keys.toList().ifEmpty { listOf("fallback") }
 
-    override fun listModelNames(type: Class<out AiModel<*>>): List<String> =
+    override fun listModelNames(modelClass: Class<*>): List<String> =
         llmsByName.keys.toList().ifEmpty { listOf("fallback") }
 
     override fun listModels(): List<ModelMetadata> = emptyList()

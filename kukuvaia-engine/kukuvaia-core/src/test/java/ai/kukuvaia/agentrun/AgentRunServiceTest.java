@@ -3,9 +3,9 @@ package ai.kukuvaia.agentrun;
 import ai.kukuvaia.agent.PersonaService;
 import ai.kukuvaia.agent.PersonaSpec;
 import ai.kukuvaia.memory.embedding.EmbeddingService;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -319,7 +319,7 @@ class AgentRunServiceTest {
 
     // --- helpers ---------------------------------------------------------
 
-    private AgentRunSpec baseSpec(com.fasterxml.jackson.databind.JsonNode input,
+    private AgentRunSpec baseSpec(tools.jackson.databind.JsonNode input,
                                   String personaName,
                                   LlmFollowupSpec followup) {
         return new AgentRunSpec(

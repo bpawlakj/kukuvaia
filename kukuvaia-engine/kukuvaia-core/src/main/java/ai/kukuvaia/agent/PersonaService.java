@@ -1,8 +1,9 @@
 package ai.kukuvaia.agent;
 
 import ai.kukuvaia.extensions.ExtensionLoader;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -144,7 +145,7 @@ public class PersonaService {
                     personas.put(spec.name(), spec);
                     log.info("Loaded built-in persona '{}' from classpath:personas/{}",
                             spec.name(), resource.getFilename());
-                } catch (IOException e) {
+                } catch (IOException | JacksonException e) {
                     log.warn("Failed to parse persona resource {}: {}", resource.getFilename(), e.getMessage());
                 }
             }
@@ -194,7 +195,7 @@ public class PersonaService {
             PersonaSpec spec = yamlMapper.readValue(path.toFile(), PersonaSpec.class);
             personas.put(spec.name(), spec);
             log.info("Loaded persona '{}' from {}", spec.name(), path.getFileName());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to load persona from {}: {}", path, e.getMessage());
         }
     }

@@ -1,7 +1,9 @@
 kukuvaia:
   max-tool-rounds: 20
   llm:
+    # Seconds. Applied to every provider transport (Chat Completions, Responses, Anthropic).
     request-timeout: 120
+    connect-timeout: ${LLM_CONNECT_TIMEOUT_SECONDS:10}
   daemon:
     daily-token-budget: 100000
   subagent:
@@ -63,6 +65,11 @@ kukuvaia:
         config:
           # Anthropic native API uses x-api-key header, not Authorization: Bearer.
           auth-header: x-api-key
+          # Optional, Chat Completions transport only — extra JSON fields sent with every
+          # request. Opt-in because strict providers reject unknown fields. For litellm
+          # proxies (SmartGate) whose internal default timeout is 10 s:
+          # extra-body:
+          #   request_timeout: 120
           headers:
             anthropic-version: "2023-06-01"
         models:
@@ -93,14 +100,12 @@ spring:
     openai:
       base-url: ${LLM_BASE_URL:https://api.openai.com}
       api-key: ${LLM_API_KEY:not-used}
-      connect-timeout: ${LLM_CONNECT_TIMEOUT:10s}
-      read-timeout: ${LLM_READ_TIMEOUT:120s}
+      # Spring AI 2.x (openai-java SDK): a single request timeout replaces
+      # connect-timeout/read-timeout, and chat options are no longer nested under `options`.
+      timeout: ${LLM_READ_TIMEOUT:120s}
       chat:
-        options:
-          model: ${LLM_MODEL:claude-sonnet-4.5}
-          temperature: 0.2
-      embedding:
-        enabled: ${OPENAI_EMBEDDING_ENABLED:false}
+        model: ${LLM_MODEL:claude-sonnet-4.5}
+        temperature: 0.2
     embedding:
       transformer:
         onnx:
@@ -178,5 +183,5 @@ management:
 logging:
   level:
     ai.kukuvaia: INFO
-    org.springframework.ai.chat.client.advisor.ToolCallAdvisor: DEBUG
+    org.springframework.ai.chat.client.advisor.ToolCallingAdvisor: DEBUG
     org.springframework.ai.openai: DEBUG

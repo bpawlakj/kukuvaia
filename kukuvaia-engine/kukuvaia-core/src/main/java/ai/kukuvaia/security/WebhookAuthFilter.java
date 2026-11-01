@@ -38,6 +38,12 @@ public class WebhookAuthFilter extends OncePerRequestFilter {
     @Value("${kukuvaia.webhooks.secret:}")
     private String webhookSecret;
 
+    /**
+     * Spring Framework 7 requires an explicit cache limit. 25 MiB mirrors GitHub's maximum
+     * webhook payload size; a larger body is truncated and therefore fails HMAC verification.
+     */
+    private static final int MAX_CACHED_BODY_BYTES = 25 * 1024 * 1024;
+
     @Value("${kukuvaia.webhooks.bearer-token:}")
     private String bearerToken;
 
@@ -73,7 +79,7 @@ public class WebhookAuthFilter extends OncePerRequestFilter {
         // Try HMAC signature
         String signature = request.getHeader(SIGNATURE_HEADER);
         if (webhookSecret != null && !webhookSecret.isBlank() && signature != null) {
-            var wrappedRequest = new ContentCachingRequestWrapper(request);
+            var wrappedRequest = new ContentCachingRequestWrapper(request, MAX_CACHED_BODY_BYTES);
             // Read body to compute HMAC — must wrap request to allow re-reading
             filterChain.doFilter(wrappedRequest, response);
 

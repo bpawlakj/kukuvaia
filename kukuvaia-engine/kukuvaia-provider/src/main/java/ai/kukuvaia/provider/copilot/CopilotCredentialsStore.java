@@ -1,6 +1,7 @@
 package ai.kukuvaia.provider.copilot;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -88,7 +89,7 @@ public class CopilotCredentialsStore {
                 if (v != null) out.put(k, v.toString());
             });
             return out;
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to read credentials file {} — treating as empty: {}",
                     filePath, e.getMessage());
             return new LinkedHashMap<>();
@@ -143,11 +144,11 @@ public class CopilotCredentialsStore {
                 objectMapper.writerWithDefaultPrettyPrinter().writeValue(temp.toFile(), map);
                 Files.move(temp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
                 applyOwnerOnlyPermissions(filePath);
-            } catch (IOException e) {
+            } catch (IOException | JacksonException e) {
                 Files.deleteIfExists(temp);
                 throw e;
             }
-        } catch (IOException e) {
+        } catch (IOException | JacksonException e) {
             throw new CredentialsIoException("Failed to write credentials file " + filePath, e);
         }
     }

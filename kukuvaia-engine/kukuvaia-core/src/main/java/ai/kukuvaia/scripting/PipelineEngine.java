@@ -1,7 +1,7 @@
 package ai.kukuvaia.scripting;
 
 import ai.kukuvaia.extensions.ToolBridgeAPI;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.luaj.vm2.LuaFunction;
 import org.luaj.vm2.LuaValue;
 import org.luaj.vm2.Varargs;

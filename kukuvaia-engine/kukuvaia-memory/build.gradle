@@ -28,8 +28,8 @@ dependencies {
     api 'io.micrometer:micrometer-core'
 
     // Jackson
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
-    implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+    implementation 'tools.jackson.core:jackson-databind'
+    implementation 'tools.jackson.dataformat:jackson-dataformat-yaml'
 
     // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

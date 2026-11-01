@@ -3,8 +3,9 @@ package ai.kukuvaia.extensions;
 import ai.kukuvaia.commands.SlashCommand;
 import ai.kukuvaia.output.OutputBlock;
 import ai.kukuvaia.output.TextBlock;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.yaml.YAMLFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -74,7 +75,7 @@ public class UserCommandLoader {
                 }
             });
             log.info("Loaded user command '{}' (type={}) from {}", name, type, path.getFileName());
-        } catch (IOException e) {
+        } catch (JacksonException e) {
             log.warn("Failed to load command from {}: {}", path, e.getMessage());
         }
     }

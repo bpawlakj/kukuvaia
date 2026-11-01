@@ -1,8 +1,8 @@
 package ai.kukuvaia.dream;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Component;
@@ -86,12 +86,12 @@ public class DreamRecommendationRepository {
 
     private String toJsonMap(Map<String, Object> map) {
         try { return objectMapper.writeValueAsString(map != null ? map : Map.of()); }
-        catch (JsonProcessingException e) { return "{}"; }
+        catch (JacksonException e) { return "{}"; }
     }
 
     private Map<String, Object> parseMap(String json) {
         if (json == null) return Map.of();
         try { return objectMapper.readValue(json, new TypeReference<>() {}); }
-        catch (JsonProcessingException e) { return Map.of(); }
+        catch (JacksonException e) { return Map.of(); }
     }
 }

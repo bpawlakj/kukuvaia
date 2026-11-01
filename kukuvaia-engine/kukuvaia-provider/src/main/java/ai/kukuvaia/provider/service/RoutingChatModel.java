@@ -33,16 +33,18 @@ public class RoutingChatModel implements ChatModel {
 
     private final ChatModelCache chatModelCache;
 
-    private final OpenAiChatOptions defaultOptions = OpenAiChatOptions.builder()
-            .internalToolExecutionEnabled(false)
-            .build();
+    // Must be a ToolCallingChatOptions (OpenAiChatOptions is one): Spring AI 2.x ChatClient
+    // builds request options from getOptions().mutate() and silently DROPS all tool callbacks
+    // when that builder is not a ToolCallingChatOptions.Builder. Tool execution itself always
+    // happens in ToolCallingAdvisor.
+    private final OpenAiChatOptions defaultOptions = OpenAiChatOptions.builder().build();
 
     public RoutingChatModel(ChatModelCache chatModelCache) {
         this.chatModelCache = chatModelCache;
     }
 
     @Override
-    public ChatOptions getDefaultOptions() {
+    public ChatOptions getOptions() {
         return defaultOptions;
     }
 

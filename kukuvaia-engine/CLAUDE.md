@@ -7,8 +7,8 @@ Java/Spring Boot + Spring AI agent engine. Multi-module Gradle project handling 
 ## Tech Stack
 
 - Java 21+ (core, app) / Kotlin 2.x (agents)
-- Spring Boot 3.x
-- Spring AI 1.x — ChatClient, ToolCallAdvisor, MCP, JdbcChatMemory
+- Spring Boot 4.1 (Spring Framework 7, Jackson 3 — `tools.jackson.*`)
+- Spring AI 2.0 — ChatClient, ToolCallAdvisor, MCP, JdbcChatMemory
 - Embabel Agent Framework (agents module — Kotlin, GOAP planning)
 - PostgreSQL — sessions (JdbcChatMemoryRepository) + pipeline data (JDBC)
 - HTTP client — Authorsuite validation API
@@ -66,14 +66,14 @@ kukuvaia-engine/
 | `JdbcChatMemoryRepository` | PostgreSQL-backed session persistence |
 | `MessageChatMemoryAdvisor` | Injects conversation history into prompts |
 | `@McpTool` / `@McpToolParam` | Tool registration with auto JSON Schema |
-| `OpenAiApi.mutate().baseUrl()` | SmartGate integration (OpenAI-compatible) |
+| `OpenAiChatModel` + `OpenAiChatOptions.baseUrl()/apiKey()` | SmartGate integration (OpenAI-compatible, built on the `openai-java` SDK) |
 | `Flux<ChatResponse>` | SSE streaming for Web API |
 
 ## Key Patterns
 
 ### Multi-Provider LLM (GitHub Copilot + SmartGate)
 
-Both providers are OpenAI-compatible — same Spring AI `OpenAiApi`, different `baseUrl`.
+Both providers are OpenAI-compatible — same Spring AI `OpenAiChatModel`, different `baseUrl`/`apiKey` on `OpenAiChatOptions` (see `ChatModelFactory`).
 
 ### ChatClient with Memory + Tools
 

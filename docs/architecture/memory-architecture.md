@@ -353,6 +353,6 @@ See `.maister/docs/project/implementation-plan.md` Phase 4 for detailed steps.
 ## Dependencies
 
 - PostgreSQL with pgvector extension
-- Spring AI 1.1.0+ (ChatMemoryRepository interface, EmbeddingModel)
-- Spring Boot 3.4.4+ (JdbcTemplate, @Scheduled)
+- Spring AI 2.0+ (ChatMemoryRepository interface, EmbeddingModel)
+- Spring Boot 4.1+ (JdbcTemplate, @Scheduled)
 - pgvector Java library (`com.pgvector:pgvector`)
