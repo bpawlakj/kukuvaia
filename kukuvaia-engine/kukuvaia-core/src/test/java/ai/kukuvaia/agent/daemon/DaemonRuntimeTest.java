@@ -93,9 +93,12 @@ class DaemonRuntimeTest {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.queryForObject(anyString(), eq(Integer.class), any())).thenAnswer(inv -> ledger.get());
         // recordUsage(taskId, tokens) → jdbc.update(sql, tokens, taskId)
-        // (Object) casts select update(String, Object...) instead of update(String, Object[], int[])
+        // recordUsage SETS token_usage for one task (UPDATE ... SET token_usage = ?), the daily total is
+        // the sum over tasks — model exactly that. (Object) casts select update(String, Object...).
+        Map<Object, Integer> perTask = new ConcurrentHashMap<>();
         when(jdbc.update(anyString(), (Object) any(), (Object) any())).thenAnswer(inv -> {
-            ledger.addAndGet((Integer) inv.getArgument(1));
+            perTask.put(inv.getArgument(2), (Integer) inv.getArgument(1));
+            ledger.set(perTask.values().stream().mapToInt(Integer::intValue).sum());
             order.add("usage:" + inv.getArgument(2));
             return 1;
         });
