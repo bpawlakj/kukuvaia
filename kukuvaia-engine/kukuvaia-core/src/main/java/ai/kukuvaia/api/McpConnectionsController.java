@@ -66,6 +66,9 @@ public class McpConnectionsController {
         if (req.url() == null || req.url().isBlank()) {
             return ResponseEntity.badRequest().build();
         }
+        if (!validTransport(req.transport(), req.endpoint())) {
+            return ResponseEntity.badRequest().build();
+        }
         if (repository.findByName(req.name()).isPresent()) {
             return ResponseEntity.status(409).build();
         }
@@ -75,7 +78,9 @@ public class McpConnectionsController {
                 req.sseEndpoint() != null ? req.sseEndpoint() : "/sse",
                 req.headers() != null ? req.headers() : Map.of(),
                 req.enabled() == null || req.enabled(),
-                req.description());
+                req.description(),
+                req.transport(),
+                req.endpoint());
         cache.refresh();
         return repository.findById(id)
                 .map(c -> ResponseEntity.status(201).body(c))
@@ -84,8 +89,11 @@ public class McpConnectionsController {
 
     @PutMapping("/{id}")
     public ResponseEntity<McpConnection> update(@PathVariable UUID id, @RequestBody UpdateRequest req) {
-        int affected = repository.update(
-                id, req.url(), req.sseEndpoint(), req.headers(), req.enabled(), req.description());
+        if (!validTransport(req.transport(), req.endpoint())) {
+            return ResponseEntity.badRequest().build();
+        }
+        int affected = repository.update(id, req.url(), req.sseEndpoint(), req.headers(), req.enabled(),
+                req.description(), req.transport(), req.endpoint());
         if (affected == 0) {
             return ResponseEntity.notFound().build();
         }
@@ -112,13 +120,23 @@ public class McpConnectionsController {
         return ResponseEntity.ok(Map.of("refreshed", true, "enabledCount", cache.all().size()));
     }
 
+    /** {@code null} = keep / default; otherwise {@code sse | streamable-http}, endpoint a path. */
+    private static boolean validTransport(String transport, String endpoint) {
+        boolean transportOk = transport == null
+                || McpConnection.SSE.equals(transport) || McpConnection.STREAMABLE_HTTP.equals(transport);
+        boolean endpointOk = endpoint == null || (endpoint.startsWith("/") && endpoint.length() <= 100);
+        return transportOk && endpointOk;
+    }
+
     public record CreateRequest(
             String name,
             String url,
             String sseEndpoint,
             Map<String, String> headers,
             Boolean enabled,
-            String description
+            String description,
+            String transport,
+            String endpoint
     ) {}
 
     public record UpdateRequest(
@@ -126,6 +144,8 @@ public class McpConnectionsController {
             String sseEndpoint,
             Map<String, String> headers,
             Boolean enabled,
-            String description
+            String description,
+            String transport,
+            String endpoint
     ) {}
 }

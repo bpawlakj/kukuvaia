@@ -45,6 +45,7 @@ public class DbMcpSseClientConnectionDetails implements McpSseClientConnectionDe
     public Map<String, org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters> getConnections() {
         Map<String, org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters> out = new LinkedHashMap<>();
         for (McpConnection c : cache.all()) {
+            if (c.isStreamableHttp()) continue; // built by McpClientConfig#dbStreamableHttpTransports
             out.put(c.name(), new org.springframework.ai.mcp.client.common.autoconfigure.properties.McpSseClientProperties.SseParameters(c.url(), c.sseEndpoint()));
         }
         if (out.isEmpty()) {

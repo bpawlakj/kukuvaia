@@ -4,6 +4,10 @@ import ai.kukuvaia.mcp.DbMcpSseClientConnectionDetails;
 import ai.kukuvaia.mcp.McpConnectionsCache;
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
+import ai.kukuvaia.mcp.McpConnection;
+import org.springframework.ai.mcp.customizer.McpClientCustomizer;
 import io.modelcontextprotocol.client.transport.customizer.McpSyncHttpClientRequestCustomizer;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -29,16 +33,22 @@ import java.util.Map;
  * Wires kukuvaia's DB-backed MCP connection registry into Spring AI's
  * autoconfigure and applies per-connection outbound headers.
  *
- * <p>Two beans:
+ * <p>Beans:
  *
  * <ol>
  *   <li>{@link McpSseClientConnectionDetails} — overrides the
  *       properties-backed default so {@code spring.ai.mcp.client.sse.connections.*}
- *       YAML is irrelevant. Connections come from {@code kukuvaia.mcp_connections}
- *       via {@link McpConnectionsCache}.</li>
+ *       YAML is irrelevant. {@code transport = sse} connections come from
+ *       {@code kukuvaia.mcp_connections} via {@link McpConnectionsCache}.</li>
+ *   <li>{@link #dbStreamableHttpTransports} — one Streamable HTTP transport per
+ *       {@code transport = streamable-http} row (Spring AI's own Streamable HTTP
+ *       autoconfig only reads YAML properties).</li>
  *   <li>{@link McpSyncHttpClientRequestCustomizer} — injects the headers
  *       configured per connection. The cache's URL-prefix lookup picks
- *       the right connection for each outbound request URI.</li>
+ *       the right connection for each outbound request URI. Spring AI 2.0's SSE
+ *       transport autoconfig does <em>not</em> apply this customizer by itself, so
+ *       {@link #sseHeaderCustomizer} installs it on every SSE transport builder —
+ *       without it SSE connections silently lose their auth headers.</li>
  * </ol>
  *
  * <p>Header values in the DB can use the {@code env:VAR_NAME} convention
@@ -76,6 +86,37 @@ public class McpClientConfig {
     @Bean
     McpSyncHttpClientRequestCustomizer mcpRequestHeaderCustomizer(McpConnectionsCache cache) {
         return new PerConnectionHeaderCustomizer(cache, System::getenv);
+    }
+
+    /** Applies the per-connection headers to SSE transports (Spring AI's SSE autoconfig does not). */
+    @Bean
+    McpClientCustomizer<HttpClientSseClientTransport.Builder> sseHeaderCustomizer(
+            McpSyncHttpClientRequestCustomizer mcpRequestHeaderCustomizer) {
+        return (name, builder) -> builder.httpRequestCustomizer(mcpRequestHeaderCustomizer);
+    }
+
+    /** Streamable HTTP transports for {@code transport = streamable-http} connections. */
+    @Bean
+    List<NamedClientMcpTransport> dbStreamableHttpTransports(McpConnectionsCache cache,
+                                                             McpSyncHttpClientRequestCustomizer mcpRequestHeaderCustomizer) {
+        return streamableHttpTransports(cache.all(), mcpRequestHeaderCustomizer);
+    }
+
+    static List<NamedClientMcpTransport> streamableHttpTransports(List<McpConnection> connections,
+                                                                  McpSyncHttpClientRequestCustomizer headers) {
+        List<NamedClientMcpTransport> out = new ArrayList<>();
+        for (McpConnection c : connections) {
+            if (!c.isStreamableHttp()) continue;
+            var transport = HttpClientStreamableHttpTransport.builder(c.url())
+                    .endpoint(c.endpoint())
+                    .httpRequestCustomizer(headers)
+                    .build();
+            out.add(new NamedClientMcpTransport(c.name(), transport));
+        }
+        if (!out.isEmpty()) {
+            log.info("MCP Streamable HTTP transports from DB: {}", out.stream().map(NamedClientMcpTransport::name).toList());
+        }
+        return out;
     }
 
     /**
