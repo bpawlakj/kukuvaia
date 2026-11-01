@@ -2,7 +2,10 @@ package ai.kukuvaia.agent.daemon;
 
 import ai.kukuvaia.provider.model.ExecutionContext;
 
+import ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
+import ai.kukuvaia.agent.subagent.SubAgentResult;
+import ai.kukuvaia.agent.subagent.SubAgentSpec;
 import ai.kukuvaia.agent.daemon.DaemonTaskResult.DaemonTaskStatus;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -14,7 +17,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
-import ai.kukuvaia.provider.service.ProviderAuditLog;
 
 /**
  * Orchestrates daemon task execution via sub-agents.
@@ -33,19 +35,22 @@ public class DaemonAgentService {
     private final NotificationSanitizer notificationSanitizer;
     private final JdbcTemplate jdbc;
     private final MeterRegistry meterRegistry;
+    private final DaemonProperties properties;
 
     public DaemonAgentService(SubAgentFactory subAgentFactory,
                                DaemonBudgetGuard budgetGuard,
                                DaemonScheduleGuard scheduleGuard,
                                NotificationSanitizer notificationSanitizer,
                                JdbcTemplate jdbc,
-                               MeterRegistry meterRegistry) {
+                               MeterRegistry meterRegistry,
+                               DaemonProperties properties) {
         this.subAgentFactory = subAgentFactory;
         this.budgetGuard = budgetGuard;
         this.scheduleGuard = scheduleGuard;
         this.notificationSanitizer = notificationSanitizer;
         this.jdbc = jdbc;
         this.meterRegistry = meterRegistry;
+        this.properties = properties;
     }
 
     /**
@@ -79,22 +84,25 @@ public class DaemonAgentService {
         long taskId = insertTask(taskName, specialistType, prompt, triggerSource);
 
         try {
-            // Execute via sub-agent (inherits all sub-agent security: tool filtering, depth guard, etc.)
-            String result = subAgentFactory.execute(prompt, specialistType,
-                    ExecutionContext.DAEMON, providerOverride);
+            // Execute via sub-agent (inherits all sub-agent security: tool filtering, depth guard,
+            // tool-round limit, timeout). The daemon allowlist narrows tools for every daemon run.
+            SubAgentResult run = subAgentFactory.executeForResult(prompt, specialistType,
+                    ExecutionContext.DAEMON, providerOverride, 0, properties.toolScopeOrNull());
+            String result = run.content();
+            int tokens = billableTokens(run, specialistType);
 
             Instant completedAt = Instant.now();
             long durationMs = Duration.between(startedAt, completedAt).toMillis();
 
-            // Update task record
+            // Update task record, then account the tokens against the daily budget
             completeTask(taskId, result, durationMs);
+            budgetGuard.recordUsage(taskId, tokens);
 
             var taskResult = new DaemonTaskResult(
                     taskId, taskName, specialistType,
                     providerOverride != null ? providerOverride : "daemon-default",
                     DaemonTaskStatus.COMPLETED, result, null,
-                    0, // token usage updated by ProviderAuditLog
-                    durationMs, triggerSource, startedAt, completedAt);
+                    tokens, durationMs, triggerSource, startedAt, completedAt);
 
             log.info("Daemon task '{}' completed in {}ms (task #{})",
                     taskName, durationMs, taskId);
@@ -106,6 +114,12 @@ public class DaemonAgentService {
             Instant completedAt = Instant.now();
             long durationMs = Duration.between(startedAt, completedAt).toMillis();
             failTask(taskId, e.getMessage(), durationMs);
+            // A timed-out call may already have consumed tokens the provider never reported:
+            // charge the specialist's max_tokens (fail closed). Other failures happen before or
+            // without a billed completion, so nothing is charged.
+            if (e instanceof SubAgentFactory.SubAgentTimeoutException) {
+                budgetGuard.recordUsage(taskId, maxTokensOf(specialistType));
+            }
 
             log.error("Daemon task '{}' failed after {}ms: {}",
                     taskName, durationMs, e.getMessage());
@@ -120,6 +134,24 @@ public class DaemonAgentService {
         } finally {
             scheduleGuard.release(taskName);
         }
+    }
+
+    /**
+     * Tokens to charge against the daily budget. If the provider reported no usage, charge the
+     * specialist's {@code max_tokens} instead of zero — an unknown cost must not look free.
+     */
+    private int billableTokens(SubAgentResult run, String specialistType) {
+        if (run.usageReported()) {
+            return run.totalTokens();
+        }
+        int estimate = maxTokensOf(specialistType);
+        log.warn("Specialist '{}' reported no token usage — charging max_tokens={} to the daemon budget",
+                specialistType, estimate);
+        return estimate;
+    }
+
+    private int maxTokensOf(String specialistType) {
+        return subAgentFactory.spec(specialistType).map(SubAgentSpec::maxTokens).orElse(0);
     }
 
     private void recordMetrics(String taskName, String specialist, String status, long durationMs) {

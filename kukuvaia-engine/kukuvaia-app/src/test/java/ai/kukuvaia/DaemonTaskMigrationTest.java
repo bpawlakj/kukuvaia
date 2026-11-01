@@ -4,7 +4,9 @@ import ai.kukuvaia.agent.daemon.DaemonAgentService;
 import ai.kukuvaia.agent.daemon.DaemonBudgetGuard;
 import ai.kukuvaia.agent.daemon.DaemonScheduleGuard;
 import ai.kukuvaia.agent.daemon.NotificationSanitizer;
+import ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties;
 import ai.kukuvaia.agent.subagent.SubAgentFactory;
+import ai.kukuvaia.agent.subagent.SubAgentResult;
 import ai.kukuvaia.api.webhook.WebhookController;
 import ai.kukuvaia.provider.model.ExecutionContext;
 import ai.kukuvaia.security.PayloadSanitizer;
@@ -48,10 +50,11 @@ class DaemonTaskMigrationTest {
         ReflectionTestUtils.setField(budget, "dailyTokenBudget", 100_000);
         ReflectionTestUtils.setField(budget, "alertThreshold", 0.8);
         var specialists = mock(SubAgentFactory.class);
-        when(specialists.execute(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull()))
-                .thenReturn("Build failure analyzed");
+        when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
+                eq(0), isNull()))
+                .thenReturn(new SubAgentResult("Build failure analyzed", 100, 23, true));
         var daemon = new DaemonAgentService(specialists, budget, new DaemonScheduleGuard(),
-                new NotificationSanitizer(), jdbc, new SimpleMeterRegistry());
+                new NotificationSanitizer(), jdbc, new SimpleMeterRegistry(), new DaemonProperties());
         var mvc = MockMvcBuilders.standaloneSetup(new WebhookController(daemon,
                         new PayloadSanitizer(new ObjectMapper())))
                 .addFilters(new WebhookRateLimiter(10, 100), new WebhookAuthFilter("", "test-token", true))
@@ -67,10 +70,13 @@ class DaemonTaskMigrationTest {
                 String.class, taskId)).isEqualTo("Build failure analyzed");
         assertThat(jdbc.queryForObject("SELECT completed_at IS NOT NULL AND duration_ms >= 0 "
                 + "FROM kukuvaia_agent.daemon_tasks WHERE id = ?", Boolean.class, taskId)).isTrue();
-        budget.recordUsage(taskId, 123);
+        // Token usage reported by the sub-agent is accounted automatically (no manual recordUsage).
+        assertThat(jdbc.queryForObject("SELECT token_usage FROM kukuvaia_agent.daemon_tasks WHERE id = ?",
+                Integer.class, taskId)).isEqualTo(123);
         assertThat(budget.getRemainingBudget()).isEqualTo(99_877);
 
-        when(specialists.execute(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull()))
+        when(specialists.executeForResult(anyString(), eq("analyst"), eq(ExecutionContext.DAEMON), isNull(),
+                eq(0), isNull()))
                 .thenThrow(new IllegalStateException("Synthetic specialist failure"));
         mvc.perform(post("/api/webhooks/ci").contentType("application/json")
                         .header("Authorization", "Bearer test-token")
