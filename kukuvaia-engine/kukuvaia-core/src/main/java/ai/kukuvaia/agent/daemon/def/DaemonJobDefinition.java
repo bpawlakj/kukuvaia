@@ -19,11 +19,14 @@ import java.util.Map;
  * @param source      where the definition came from (classpath file, project file, "adhoc")
  * @param inputMatch  optional filter: the run only starts if each listed field has one of the values
  *                    (case-insensitive), e.g. {@code status: [failed, error]}
+ * @param args        {@code kind: mcp} only — tool arguments; string values are templates over declared
+ *                    fields (rendered flattened), numbers/booleans are literal
  */
 public record DaemonJobDefinition(String name, String description, JobKind kind, String target,
                                   List<String> inputFields, String prompt, List<DaemonTrigger> triggers,
                                   String provider, JobLimits limits, Overlap overlap, List<String> notifications,
-                                  boolean enabled, String source, Map<String, List<String>> inputMatch) {
+                                  boolean enabled, String source, Map<String, List<String>> inputMatch,
+                                  Map<String, Object> args) {
 
     public DaemonJobDefinition {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("job name is required");
@@ -36,6 +39,15 @@ public record DaemonJobDefinition(String name, String description, JobKind kind,
         if (overlap == null) overlap = Overlap.skip();
         if (description == null) description = "";
         inputMatch = inputMatch == null ? Map.of() : Map.copyOf(inputMatch);
+        args = args == null ? Map.of() : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(args));
+    }
+
+    public DaemonJobDefinition(String name, String description, JobKind kind, String target,
+                               List<String> inputFields, String prompt, List<DaemonTrigger> triggers,
+                               String provider, JobLimits limits, Overlap overlap, List<String> notifications,
+                               boolean enabled, String source, Map<String, List<String>> inputMatch) {
+        this(name, description, kind, target, inputFields, prompt, triggers, provider, limits, overlap,
+                notifications, enabled, source, inputMatch, Map.of());
     }
 
     public DaemonJobDefinition(String name, String description, JobKind kind, String target,

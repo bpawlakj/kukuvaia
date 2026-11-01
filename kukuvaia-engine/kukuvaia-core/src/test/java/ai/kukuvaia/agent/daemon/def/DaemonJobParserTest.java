@@ -150,6 +150,18 @@ class DaemonJobParserTest {
     }
 
     @Test
+    @DisplayName("args: mcp only, scalars only, placeholders limited to declared fields")
+    void mcpArgs() {
+        var d = parse("name: x1\nkind: mcp\ntarget: { connection: c, tool: t }\ninput: { fields: [q] }\nargs: { q: \"{{fields.q}}\", n: 3, on: true }\n");
+        assertThat(d.args()).containsEntry("q", "{{fields.q}}").containsEntry("n", 3).containsEntry("on", true);
+        assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\nargs: { a: 1 }\n")).hasMessageContaining("only supported for kind: mcp");
+        assertThatThrownBy(() -> parse("name: x1\nkind: mcp\ntarget: { connection: c, tool: t }\nargs: { a: { nested: 1 } }\n"))
+                .hasMessageContaining("must be a string, number or boolean");
+        assertThatThrownBy(() -> parse("name: x1\nkind: mcp\ntarget: { connection: c, tool: t }\nargs: { a: \"{{fields.secret}}\" }\n"))
+                .hasMessageContaining("{{fields.secret}}");
+    }
+
+    @Test
     @DisplayName("provider is validated; integers beyond int range are rejected (no silent wrap to 'unset')")
     void providerAndIntegerRange() {
         assertThatThrownBy(() -> parse("name: x1\nkind: java\ntarget: t\nprovider: 'https://evil'\n"))

@@ -300,7 +300,7 @@ public class DaemonRuntime {
             store.markRunning(taskId);
             Duration timeout = job.limits().timeout();
             JobInvocation invocation = new JobInvocation(taskId, job.name(), job.target(), request.prompt(),
-                    request.fields(), job.provider(), startedAt.plus(timeout));
+                    request.fields(), job.provider(), startedAt.plus(timeout), job.args());
             DaemonExecutor executor = executors.get(job.kind());
 
             ExecutionOutcome outcome = null;

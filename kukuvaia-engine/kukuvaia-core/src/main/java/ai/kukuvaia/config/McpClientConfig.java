@@ -165,6 +165,20 @@ public class McpClientConfig {
         return clients;
     }
 
+    /** Clients by connection name — the client info name is {@code "<common name> - <connection>"}. */
+    @Bean
+    ai.kukuvaia.mcp.McpClientRegistry mcpClientRegistry(
+            @org.springframework.beans.factory.annotation.Qualifier("kukuvaiaMcpSyncClients") List<McpSyncClient> clients,
+            McpClientCommonProperties commonProperties) {
+        String prefix = commonProperties.getName() + " - ";
+        Map<String, McpSyncClient> byName = new java.util.LinkedHashMap<>();
+        for (McpSyncClient client : clients) {
+            String name = client.getClientInfo().name();
+            byName.put(name.startsWith(prefix) ? name.substring(prefix.length()) : name, client);
+        }
+        return new ai.kukuvaia.mcp.McpClientRegistry(byName);
+    }
+
     /**
      * Matches the outbound URI to a configured connection, reads its
      * header map from the cache, resolves env refs, and applies headers.

@@ -38,7 +38,8 @@ import java.util.regex.Pattern;
 public final class DaemonJobParser {
 
     private static final Set<String> TOP_LEVEL = Set.of("name", "description", "kind", "target", "input", "prompt",
-            "triggers", "provider", "limits", "overlap", "notify", "enabled");
+            "triggers", "provider", "limits", "overlap", "notify", "enabled", "args");
+    private static final int MAX_ARGS = 32;
     private static final Set<String> LIMIT_KEYS = Set.of("timeout", "max_tokens", "max_tool_rounds", "max_actions", "token_budget");
     private static final Pattern NAME = Pattern.compile("[a-z0-9][a-z0-9-]{1,63}");
     private static final Pattern ROUTE = Pattern.compile("[a-z0-9][a-z0-9-]{0,39}");
@@ -99,8 +100,41 @@ public final class DaemonJobParser {
         boolean enabled = doc.get("enabled") == null || bool(source, doc.get("enabled"), "enabled");
         String description = optionalString(source, doc, "description");
 
+        Map<String, Object> args = parseArgs(source, kind, doc.get("args"), fields);
+
         return new DaemonJobDefinition(name, description, kind, target, fields, prompt, triggers, provider,
-                limits, overlap, notify.isEmpty() ? List.of("log") : notify, enabled, source, match);
+                limits, overlap, notify.isEmpty() ? List.of("log") : notify, enabled, source, match, args);
+    }
+
+    /**
+     * {@code args:} for {@code kind: mcp} — a flat map of scalars. String values may use
+     * {@code {{fields.x}}} for declared fields only; arguments are built as typed values, never by
+     * splicing text into JSON.
+     */
+    private static Map<String, Object> parseArgs(String source, JobKind kind, Object raw, List<String> fields) {
+        if (raw == null) return Map.of();
+        if (kind != JobKind.MCP) fail(source, "args is only supported for kind: mcp");
+        if (!(raw instanceof Map<?, ?> map)) {
+            fail(source, "args must be a map of argument name to value");
+            return Map.of();
+        }
+        if (map.size() > MAX_ARGS) fail(source, "args may have at most " + MAX_ARGS + " entries");
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        for (var e : map.entrySet()) {
+            String key = String.valueOf(e.getKey());
+            if (!FIELD.matcher(key).matches()) fail(source, "args key '" + key + "' must match " + FIELD.pattern());
+            Object value = e.getValue();
+            if (value instanceof String s) {
+                Set<String> invalid = PromptRenderer.invalidPlaceholders(s, new HashSet<>(fields));
+                if (!invalid.isEmpty()) {
+                    fail(source, "args." + key + " uses placeholders that are not declared input fields: " + invalid);
+                }
+            } else if (!(value instanceof Number) && !(value instanceof Boolean)) {
+                fail(source, "args." + key + " must be a string, number or boolean");
+            }
+            out.put(key, value);
+        }
+        return out;
     }
 
     private static String parseTarget(String source, JobKind kind, Object raw) {
