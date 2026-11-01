@@ -52,6 +52,7 @@ class LlmProviderServiceTest {
     @Test
     @DisplayName("resolve with empty string — falls back to supervisor role")
     void resolve_empty_fallsToSupervisor() {
+        when(chatModelCache.getByRole("daemon")).thenReturn(null); // no dedicated daemon role configured
         when(chatModelCache.getByRole("supervisor")).thenReturn(mockChatModel);
 
         ChatModel result = service.resolve("", ExecutionContext.DAEMON);

@@ -244,10 +244,11 @@ public class SubAgentFactory {
             String effectiveProvider = providerOverride != null ? providerOverride : spec.provider();
             if (spec.tier() != null && !spec.tier().isBlank()) {
                 try {
-                    chatModel = providerService.resolveByRole(spec.tier());
+                    // Context-aware: under DAEMON a Copilot-backed tier is refused (not an explicit opt-in).
+                    chatModel = providerService.resolveByRole(spec.tier(), context);
                     effectiveProvider = spec.tier(); // for logging
                     log.debug("Resolved tier '{}' to model for specialist '{}'", spec.tier(), specialistType);
-                } catch (Exception e) {
+                } catch (LlmProviderService.ProviderNotAvailableException e) {
                     log.warn("Tier '{}' not available, falling back to provider resolution", spec.tier());
                     chatModel = providerService.resolve(effectiveProvider, context);
                 }

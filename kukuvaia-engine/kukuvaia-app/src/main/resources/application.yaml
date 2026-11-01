@@ -5,6 +5,10 @@ kukuvaia:
     request-timeout: 120
     connect-timeout: ${LLM_CONNECT_TIMEOUT_SECONDS:10}
   daemon:
+    # Routing role for unattended work (cron, webhooks, PG NOTIFY). Point it at SmartGate via
+    # llm-providers.roles.daemon. Without that role daemon work uses the supervisor role, and is
+    # refused if that resolves to GitHub Copilot — Copilot is opt-in per job (provider: copilot).
+    default-provider: ${KUKUVAIA_DAEMON_PROVIDER:daemon}
     daily-token-budget: 100000
   subagent:
     max-parallel-workers: 3
@@ -83,6 +87,7 @@ kukuvaia:
       supervisor: ${LLM_MODEL:claude-sonnet-4-6}
       advisor: ${LLM_MODEL:claude-sonnet-4-6}
       worker: ${LLM_MODEL:claude-sonnet-4-6}
+      # daemon: <SmartGate model id>   # unattended work (kukuvaia.daemon.default-provider)
 
 spring:
   application:

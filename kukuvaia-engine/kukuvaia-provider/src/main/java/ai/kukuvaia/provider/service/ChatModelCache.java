@@ -177,6 +177,18 @@ public class ChatModelCache {
         return pair == null ? Optional.empty() : Optional.of(pair.model());
     }
 
+    /**
+     * The provider behind a routing role, or empty if the role is not assigned.
+     * Used by the daemon provider policy to refuse Copilot for unattended work.
+     */
+    public Optional<ProviderRecord> getProviderForRole(String role) {
+        UUID modelUuid = roleIndex.get(role);
+        if (modelUuid == null) return Optional.empty();
+        String modelId = uuidToModelId.get(modelUuid);
+        ProviderModelPair pair = modelId == null ? null : configIndex.get(modelId);
+        return pair == null ? Optional.empty() : Optional.of(pair.provider());
+    }
+
     // ── Internal ─────────────────────────────────────────────────────────────
 
     private void buildConfigIndex() {
