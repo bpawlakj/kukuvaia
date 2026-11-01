@@ -46,7 +46,9 @@ class SubAgentFactoryParallelTest {
                         "You are a summarizer.", List.of(), "haiku", 1024, 1, 0.0, 10)
         ));
 
-        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor, toolRegistry, specLoader, new SimpleMeterRegistry());
+        factory = new SubAgentFactory(providerService, guard, toolResultAdvisor,
+                new ai.kukuvaia.provider.service.ProviderAuditLog(new SimpleMeterRegistry()),
+                toolRegistry, specLoader, new SimpleMeterRegistry());
     }
 
     @Test

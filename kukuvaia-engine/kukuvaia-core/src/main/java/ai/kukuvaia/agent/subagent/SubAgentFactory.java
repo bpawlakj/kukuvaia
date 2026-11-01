@@ -3,7 +3,9 @@ package ai.kukuvaia.agent.subagent;
 import ai.kukuvaia.provider.model.ExecutionContext;
 import ai.kukuvaia.config.ToolRegistryConfig;
 import ai.kukuvaia.provider.service.LlmProviderService;
+import ai.kukuvaia.provider.service.ProviderAuditLog;
 import ai.kukuvaia.security.ToolResultSanitizingAdvisor;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -17,8 +19,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -26,8 +30,13 @@ import java.util.concurrent.TimeoutException;
  * Creates isolated ChatClient instances for specialist sub-agents.
  * Integrates SubAgentGuard for all security controls.
  *
+ * <p>Every call goes through {@link #runSpecialist}: tool filtering, prompt hardening, model
+ * resolution, a per-call {@code ChatClient} with {@link ProviderAuditLog} (metrics + token log)
+ * and {@link ToolResultSanitizingAdvisor}, and a hard timeout. Spring AI 2.x registers its
+ * {@code ToolCallingAdvisor} automatically, so tools still run inside the client.
+ *
  * Covers: Finding #6 (recursive spawning), #7 (tool escalation),
- * #12 (prompt injection), sub-agent DoS controls.
+ * #9 (structured request logging), #12 (prompt injection), sub-agent DoS controls.
  */
 @Component
 public class SubAgentFactory {
@@ -38,26 +47,45 @@ public class SubAgentFactory {
     private final LlmProviderService providerService;
     private final SubAgentGuard guard;
     private final ToolResultSanitizingAdvisor toolResultAdvisor;
+    private final ProviderAuditLog providerAuditLog;
     private final ToolRegistryConfig toolRegistry;
     private final Map<String, SubAgentSpec> specs; // loaded from YAML at startup
+    /** Runs the outer per-worker tasks of {@link #executeParallel}; bounded by the guard's limit. */
     private final ExecutorService workerExecutor;
+    /**
+     * Runs the actual LLM call of every sub-agent invocation. A dedicated executor (not the
+     * common fork-join pool) so a timed-out call can be cancelled with an interrupt. Concurrency
+     * is bounded upstream: by {@link SubAgentGuard#validateParallelCount} for parallel workers and
+     * by the daemon/interactive callers for single calls.
+     */
+    private final ExecutorService callExecutor;
     private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
     public SubAgentFactory(LlmProviderService providerService,
                             SubAgentGuard guard,
                             ToolResultSanitizingAdvisor toolResultAdvisor,
+                            ProviderAuditLog providerAuditLog,
                             @Lazy ToolRegistryConfig toolRegistry,
                             SubAgentSpecLoader specLoader,
                             io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         this.providerService = providerService;
         this.guard = guard;
         this.toolResultAdvisor = toolResultAdvisor;
+        this.providerAuditLog = providerAuditLog;
         this.toolRegistry = toolRegistry;
         this.specs = specLoader.loadAll();
         this.meterRegistry = meterRegistry;
         this.workerExecutor = Executors.newFixedThreadPool(
                 guard.maxParallelWorkers(),
                 Thread.ofVirtual().name("kukuvaia-worker-", 0).factory());
+        this.callExecutor = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name("kukuvaia-subagent-", 0).factory());
+    }
+
+    @PreDestroy
+    void shutdown() {
+        workerExecutor.shutdownNow();
+        callExecutor.shutdownNow();
     }
 
     /**
@@ -80,86 +108,37 @@ public class SubAgentFactory {
     public String execute(String task, String specialistType,
                            ExecutionContext context, String providerOverride,
                            int currentDepth, Collection<String> personaTools) {
+        return executeForResult(task, specialistType, context, providerOverride, currentDepth, personaTools)
+                .content();
+    }
+
+    /**
+     * Same as {@link #execute(String, String, ExecutionContext, String, int, Collection)} but also
+     * returns the token usage reported by the model — used by callers that enforce budgets.
+     */
+    public SubAgentResult executeForResult(String task, String specialistType,
+                                           ExecutionContext context, String providerOverride,
+                                           int currentDepth, Collection<String> personaTools) {
         // Security: depth guard — prevent recursive spawning
         guard.validateDepth(currentDepth);
-
-        SubAgentSpec spec = specs.get(specialistType);
-        if (spec == null) {
-            throw new IllegalArgumentException("Unknown specialist type: " + specialistType);
-        }
-
-        // Security: filter tools (remove delegation tools + intersect with persona)
-        Set<String> safeTools = guard.filterTools(spec.tools(), personaTools);
-
-        // Security: harden system prompt with anti-injection instructions
-        String safePrompt = guard.hardenSystemPrompt(spec.systemPrompt());
-
-        // Resolve model: tier → provider → context default
-        // Tier-based resolution uses DB-backed roles (e.g., "worker" → Haiku)
-        String effectiveProvider = providerOverride != null ? providerOverride : spec.provider();
-        ChatModel chatModel;
-        if (spec.tier() != null && !spec.tier().isBlank()) {
-            try {
-                chatModel = providerService.resolveByRole(spec.tier());
-                effectiveProvider = spec.tier(); // for logging
-                log.debug("Resolved tier '{}' to model for specialist '{}'", spec.tier(), specialistType);
-            } catch (Exception e) {
-                log.warn("Tier '{}' not available, falling back to provider resolution", spec.tier());
-                chatModel = providerService.resolve(effectiveProvider, context);
-            }
-        } else {
-            chatModel = providerService.resolve(effectiveProvider, context);
-        }
-
-        String resolvedProvider = effectiveProvider; // effectively final for lambda
-
-        log.info("Creating sub-agent: specialist={}, provider={}, context={}, tools={}, depth={}",
-                specialistType, resolvedProvider, context, safeTools.size(), currentDepth);
-
-        // Build isolated ChatClient
-        // Note: tool calling in Spring AI M6 is handled by the ChatModel, not an advisor
-        ChatClient subAgent = ChatClient.builder(chatModel)
-                .defaultSystem(safePrompt)
-                .defaultAdvisors(
-                        toolResultAdvisor         // Anti-prompt-injection in tool results
-                )
-                .defaultTools(toolRegistry.resolveAll(safeTools))
-                .build();
-
-        // Execute with timeout — prevents runaway sub-agents
-        long timeoutSeconds = spec.timeoutSeconds() > 0
-                ? spec.timeoutSeconds() : DEFAULT_TIMEOUT_SECONDS;
-
-        var chatOptions = buildSubAgentOptions(spec);
 
         io.micrometer.core.instrument.Timer.Sample sample =
                 io.micrometer.core.instrument.Timer.start(meterRegistry);
         String status = "success";
+        String[] providerHolder = {"unresolved"};
         try {
-            return CompletableFuture.supplyAsync(() ->
-                    subAgent.prompt()
-                            .options(chatOptions)
-                            .user(task)
-                            .advisors(advisorSpec -> advisorSpec.params(Map.of(
-                                    "kukuvaia.provider", resolvedProvider,
-                                    "kukuvaia.executionContext", context.name(),
-                                    "kukuvaia.specialist", specialistType
-                            )))
-                            .call().content()
-            ).get(timeoutSeconds, TimeUnit.SECONDS);
-
-        } catch (TimeoutException e) {
+            return runSpecialist(task, specialistType, context, providerOverride, personaTools,
+                    null, currentDepth, providerHolder);
+        } catch (SubAgentTimeoutException e) {
             status = "timeout";
-            log.error("Sub-agent '{}' timed out after {}s", specialistType, timeoutSeconds);
-            throw new SubAgentTimeoutException(specialistType, timeoutSeconds);
-        } catch (Exception e) {
+            throw e;
+        } catch (RuntimeException e) {
             status = "error";
-            if (e.getCause() instanceof RuntimeException re) throw re;
-            throw new RuntimeException("Sub-agent execution failed: " + e.getMessage(), e);
+            throw e;
         } finally {
             sample.stop(io.micrometer.core.instrument.Timer.builder("kukuvaia.subagent.duration")
                     .tag("specialist", specialistType)
-                    .tag("provider", resolvedProvider)
+                    .tag("provider", providerHolder[0])
                     .tag("context", context.name())
                     .tag("status", status)
                     .register(meterRegistry));
@@ -202,8 +181,9 @@ public class SubAgentFactory {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 long start = System.currentTimeMillis();
                 try {
-                    String result = executeWithModel(task.task(), task.specialistType(),
-                            context, providerOverride, personaTools, workerModel);
+                    String result = runSpecialist(task.task(), task.specialistType(),
+                            context, providerOverride, personaTools, workerModel, 0,
+                            new String[]{"worker-pool"}).content();
                     long duration = System.currentTimeMillis() - start;
                     log.info("Worker '{}' completed in {}ms", task.specialistType(), duration);
                     return new WorkerResult(task.specialistType(),
@@ -232,74 +212,93 @@ public class SubAgentFactory {
     }
 
     /**
-     * Execute a specialist with an explicit ChatModel override (used by parallel workers).
-     * Falls back to normal tier/provider resolution if modelOverride is null.
+     * The single code path every sub-agent call goes through.
+     *
+     * @param modelOverride  explicit model (parallel worker pool) or {@code null} for tier/provider resolution
+     * @param providerHolder out-parameter: receives the provider label for metrics
      */
-    private String executeWithModel(String task, String specialistType,
-                                     ExecutionContext context, String providerOverride,
-                                     Collection<String> personaTools, ChatModel modelOverride) {
-        guard.validateDepth(0);
+    private SubAgentResult runSpecialist(String task, String specialistType,
+                                         ExecutionContext context, String providerOverride,
+                                         Collection<String> personaTools, ChatModel modelOverride,
+                                         int currentDepth, String[] providerHolder) {
+        guard.validateDepth(currentDepth);
 
         SubAgentSpec spec = specs.get(specialistType);
         if (spec == null) {
             throw new IllegalArgumentException("Unknown specialist type: " + specialistType);
         }
 
+        // Security: filter tools (remove delegation tools + intersect with persona)
         Set<String> safeTools = guard.filterTools(spec.tools(), personaTools);
+
+        // Security: harden system prompt with anti-injection instructions
         String safePrompt = guard.hardenSystemPrompt(spec.systemPrompt());
 
-        // Use explicit model or fall back to normal resolution
+        // Resolve model: explicit override → tier → provider → context default
         ChatModel chatModel;
         String resolvedProvider;
         if (modelOverride != null) {
             chatModel = modelOverride;
-            resolvedProvider = "worker-pool";
+            resolvedProvider = providerHolder[0];
         } else {
             String effectiveProvider = providerOverride != null ? providerOverride : spec.provider();
             if (spec.tier() != null && !spec.tier().isBlank()) {
                 try {
                     chatModel = providerService.resolveByRole(spec.tier());
-                    effectiveProvider = spec.tier();
+                    effectiveProvider = spec.tier(); // for logging
+                    log.debug("Resolved tier '{}' to model for specialist '{}'", spec.tier(), specialistType);
                 } catch (Exception e) {
+                    log.warn("Tier '{}' not available, falling back to provider resolution", spec.tier());
                     chatModel = providerService.resolve(effectiveProvider, context);
                 }
             } else {
                 chatModel = providerService.resolve(effectiveProvider, context);
             }
-            resolvedProvider = effectiveProvider;
+            resolvedProvider = effectiveProvider != null ? effectiveProvider : "default";
         }
+        providerHolder[0] = resolvedProvider;
 
-        log.info("Creating worker sub-agent: specialist={}, provider={}, tools={}",
-                specialistType, resolvedProvider, safeTools.size());
+        log.info("Creating sub-agent: specialist={}, provider={}, context={}, tools={}, depth={}",
+                specialistType, resolvedProvider, context, safeTools.size(), currentDepth);
 
+        // Isolated ChatClient. ToolCallingAdvisor is auto-registered by Spring AI 2.x.
         ChatClient subAgent = ChatClient.builder(chatModel)
                 .defaultSystem(safePrompt)
-                .defaultAdvisors(toolResultAdvisor)
+                .defaultAdvisors(
+                        providerAuditLog,         // Provider/context/specialist + token metrics (finding #9)
+                        toolResultAdvisor         // Anti-prompt-injection in tool results
+                )
                 .defaultTools(toolRegistry.resolveAll(safeTools))
                 .build();
 
         long timeoutSeconds = spec.timeoutSeconds() > 0
                 ? spec.timeoutSeconds() : DEFAULT_TIMEOUT_SECONDS;
-
         var chatOptions = buildSubAgentOptions(spec);
 
+        Future<SubAgentResult> call = callExecutor.submit(() -> SubAgentResult.from(
+                subAgent.prompt()
+                        .options(chatOptions)
+                        .user(task)
+                        .advisors(advisorSpec -> advisorSpec.params(Map.of(
+                                "kukuvaia.provider", resolvedProvider,
+                                "kukuvaia.executionContext", context.name(),
+                                "kukuvaia.specialist", specialistType
+                        )))
+                        .call().chatResponse()));
         try {
-            return CompletableFuture.supplyAsync(() ->
-                    subAgent.prompt()
-                            .options(chatOptions)
-                            .user(task)
-                            .advisors(advisorSpec -> advisorSpec.params(Map.of(
-                                    "kukuvaia.provider", resolvedProvider,
-                                    "kukuvaia.executionContext", context.name(),
-                                    "kukuvaia.specialist", specialistType
-                            )))
-                            .call().content()
-            ).get(timeoutSeconds, TimeUnit.SECONDS);
+            return call.get(timeoutSeconds, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
+            // Interrupt the in-flight call instead of letting it run on in the background.
+            call.cancel(true);
+            log.error("Sub-agent '{}' timed out after {}s — call cancelled", specialistType, timeoutSeconds);
             throw new SubAgentTimeoutException(specialistType, timeoutSeconds);
-        } catch (Exception e) {
+        } catch (InterruptedException e) {
+            call.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Sub-agent execution interrupted", e);
+        } catch (ExecutionException e) {
             if (e.getCause() instanceof RuntimeException re) throw re;
-            throw new RuntimeException("Sub-agent execution failed: " + e.getMessage(), e);
+            throw new RuntimeException("Sub-agent execution failed: " + e.getCause(), e.getCause());
         }
     }
 
@@ -308,6 +307,11 @@ public class SubAgentFactory {
      */
     public Set<String> availableSpecialists() {
         return specs.keySet();
+    }
+
+    /** Spec lookup for callers that need the specialist's limits (e.g. the daemon budget). */
+    public java.util.Optional<SubAgentSpec> spec(String specialistType) {
+        return java.util.Optional.ofNullable(specs.get(specialistType));
     }
 
     /**
