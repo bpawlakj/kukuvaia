@@ -1,11 +1,11 @@
 ---
 id: T-006
 title: "JavaJobExecutor + DaemonJob/JobContext"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: afc9d91
 depends_on: [T-005]
 blocks: [T-008]
 plan_anchor: d2--runtime-core-executor-spi-persistence-api

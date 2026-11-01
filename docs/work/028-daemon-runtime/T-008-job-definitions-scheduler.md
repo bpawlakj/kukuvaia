@@ -1,11 +1,11 @@
 ---
 id: T-008
 title: "YAML job loader/registry + dedicated cron scheduler + kill switch"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 4e3f672
 depends_on: [T-005, T-006]
 blocks: [T-009, T-010, T-011]
 plan_anchor: d3--job-definitions-triggers-notifications

@@ -1,11 +1,11 @@
 ---
 id: T-005
 title: "DaemonRuntime core + executor SPI + SpecialistExecutor + V24 migration"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: 4ae95c8
 depends_on: [T-001, T-002, T-003, T-004]
 blocks: [T-006, T-007, T-008, T-012, T-014, T-015]
 plan_anchor: d2--runtime-core-executor-spi-persistence-api

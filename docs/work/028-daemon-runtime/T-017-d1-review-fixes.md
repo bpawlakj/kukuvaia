@@ -1,11 +1,11 @@
 ---
 id: T-017
 title: "Follow-up to T-001..T-003: close D1 security-review findings"
-status: pending
+status: done
 plan: ../plan.md
 created: 2026-11-01
-completed: null
-commit: null
+completed: 2026-11-01
+commit: c6109f2
 depends_on: [T-001, T-002, T-003]
 blocks: [T-016]
 plan_anchor: d1--fail-closed-controls-no-new-features

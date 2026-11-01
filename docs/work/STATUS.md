@@ -8,7 +8,7 @@
 
 | ID | Initiative | Tasks (done/total) | Updated |
 |----|------------|---------------------|---------|
-| 028 | [daemon-runtime](028-daemon-runtime/) | 4/16 | 2026-11-01 |
+| 028 | [daemon-runtime](028-daemon-runtime/) | 9/17 | 2026-11-01 |
 
 ## Backlog
 
