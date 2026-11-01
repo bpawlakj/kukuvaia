@@ -88,7 +88,10 @@ class EmbabelModelBridgeConfig(
     // Embabel 1.5 replaced the deprecated `Llm` class with `SpringAiLlmService`.
     private fun createLlm(name: String, chatModel: ChatModel): SpringAiLlmService {
         val role = if (name == "fallback") "supervisor" else name
-        val copilot = chatModelCache.getProviderForRole(role).map { LlmProviderService.isCopilot(it) }.orElse(null)
+        // Resolved per call, so a provider change behind the role is never judged on stale metadata.
+        val copilot: () -> Boolean? = {
+            chatModelCache.getProviderForRole(role).map { LlmProviderService.isCopilot(it) }.orElse(null)
+        }
         val guarded = GuardedChatModel(name, chatModel, copilot, daemonRuns, meterRegistry.ifAvailable)
         return SpringAiLlmService(name, "kukuvaia", guarded, DefaultOptionsConverter)
     }

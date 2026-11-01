@@ -33,6 +33,7 @@ import java.util.Map.entry
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import org.mockito.kotlin.doReturn
 import com.embabel.agent.core.Agent as AgentDefinition
 
 data class Step1(val n: Int)
@@ -60,6 +61,24 @@ class SlowAgent {
     fun sleep(input: UserInput): Slept { Thread.sleep(10_000); return Slept(true) }
 }
 
+/** One action that keeps calling the model (a tool loop / retries inside a single action). */
+@Agent(description = "Chatty single action")
+class ChattyAgent {
+    companion object { lateinit var model: ChatModel }
+
+    @AchievesGoal(description = "chat") @Action
+    fun chat(input: UserInput): Answer {
+        repeat(10) { model.call(Prompt("round $it")) }
+        return Answer("done")
+    }
+}
+
+@Agent(description = "Fails with sensitive text")
+class LeakyAgent {
+    @AchievesGoal(description = "leak") @Action
+    fun leak(input: UserInput): Answer = throw IllegalStateException("secret prompt content: ${input.content}")
+}
+
 /** Calls a Copilot-backed model the way Embabel does (ChatModel directly, inside an action). */
 @Agent(description = "Uses a Copilot model")
 class CopilotAgent {
@@ -73,20 +92,32 @@ class CopilotAgent {
 class EmbabelAgentExecutorTest {
 
     private lateinit var platform: AgentPlatform
-    private val runs = DaemonEmbabelRuns()
+    private lateinit var runs: DaemonEmbabelRuns
     private lateinit var executor: EmbabelAgentExecutor
+    private lateinit var beans: StaticListableBeanFactory
 
     @BeforeEach
     fun setUp() {
         platform = IntegrationTestUtils.dummyAgentPlatform()
         val reader = AgentMetadataReader()
-        listOf(PingAgent(), TokenHungryAgent(), SlowAgent(), CopilotAgent())
+        listOf(PingAgent(), TokenHungryAgent(), SlowAgent(), CopilotAgent(), ChattyAgent(), LeakyAgent())
             .forEach { platform.deploy(reader.createAgentMetadata(it) as AgentDefinition) }
-        val beans = StaticListableBeanFactory()
+        beans = StaticListableBeanFactory()
         beans.addBean("platform", platform)
         beans.addBean("mapper", JsonMapper.builder().build())
-        executor = EmbabelAgentExecutor(beans.getBeanProvider(AgentPlatform::class.java), runs,
-            beans.getBeanProvider(tools.jackson.databind.ObjectMapper::class.java))
+        runs = DaemonEmbabelRuns(beans.getBeanProvider(AgentPlatform::class.java))
+        executor = executor(beans)
+    }
+
+    private fun executor(beans: StaticListableBeanFactory) =
+        EmbabelAgentExecutor(beans.getBeanProvider(AgentPlatform::class.java), runs,
+            beans.getBeanProvider(tools.jackson.databind.ObjectMapper::class.java),
+            beans.getBeanProvider(com.embabel.common.ai.model.ModelProvider::class.java))
+
+    private fun usageModel(tokensPerCall: Int): ChatModel = ChatModel {
+        ChatResponse(listOf(Generation(AssistantMessage("ok"))),
+            org.springframework.ai.chat.metadata.ChatResponseMetadata.builder()
+                .usage(org.springframework.ai.chat.metadata.DefaultUsage(tokensPerCall / 2, tokensPerCall / 2)).build())
     }
 
     private fun invocation(target: String, prompt: String = "hello daemon", provider: String? = null, timeout: Duration = Duration.ofSeconds(10)) =
@@ -149,13 +180,61 @@ class EmbabelAgentExecutorTest {
 
         assertTrue(e.timedOut())
         assertTrue(elapsed < Duration.ofSeconds(3), "took $elapsed")
-        assertEquals(0, runs.active())
+        assertTrue(e.usageReported() && e.totalTokens() >= 20_000, "killed run charges at least token_budget: ${e.totalTokens()}")
     }
+
+    @Test
+    @DisplayName("D4 review #3: token_budget holds inside one action — the guard refuses the call that would exceed it")
+    fun tokenCapInsideOneAction() {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val metered = usageModel(400)
+        ChattyAgent.model = GuardedChatModel("worker", ChatModel { calls.incrementAndGet(); metered.call(it) },
+            copilot = false, runs = runs, meterRegistry = null)
+
+        val e = assertFailsWith<ExecutionFailedException> { executor.execute(invocation("ChattyAgent"), limits(tokenBudget = 1000)) }
+
+        assertTrue(e.message!!.contains("token_budget of 1000 reached"), e.message)
+        assertEquals(3, calls.get()) // 400 + 400 + 400 ≥ 1000 → 4th call refused
+        assertTrue(e.totalTokens() >= 1200, "charged ${e.totalTokens()}")
+    }
+
+    @Test
+    @DisplayName("D4 review #4: stored error is a fixed text — no exception message / prompt content")
+    fun errorTextFixed() {
+        val e = assertFailsWith<ExecutionFailedException> { executor.execute(invocation("LeakyAgent", "TOPSECRET-42"), limits()) }
+
+        assertTrue(!e.message!!.contains("TOPSECRET-42") && !e.message!!.contains("secret prompt"), e.message)
+    }
+
+    @Test
+    @DisplayName("D4 review #6/#9: foreign ModelProvider beans or tool-group agents disable/refuse embabel jobs")
+    fun unguardedProvidersAndToolGroups() {
+        val foreign = StaticListableBeanFactory()
+        foreign.addBean("platform", platform)
+        foreign.addBean("otherModels", org.mockito.kotlin.mock<com.embabel.common.ai.model.ModelProvider>())
+        val reg = DaemonJobRegistry(listOf(executor(foreign)), listOf(entry("p.yaml", "name: p1\nkind: embabel\ntarget: PingAgent\n")))
+        assertTrue(registryRejected(reg).contains("not kukuvaia's guarded provider"), registryRejected(reg))
+
+        val requirement = org.mockito.kotlin.mock<com.embabel.agent.core.ToolGroupRequirement> { on { role } doReturn "math" }
+        val action = org.mockito.kotlin.mock<com.embabel.agent.core.Action> { on { toolGroups } doReturn setOf(requirement) }
+        val toolAgent = org.mockito.kotlin.mock<AgentDefinition> {
+            on { name } doReturn "ToolUser"
+            on { actions } doReturn listOf(action)
+        }
+        val toolPlatform = org.mockito.kotlin.mock<AgentPlatform> { on { agents() } doReturn listOf(toolAgent) }
+        val tools = StaticListableBeanFactory()
+        tools.addBean("platform", toolPlatform)
+        val reg2 = DaemonJobRegistry(listOf(executor(tools)), listOf(entry("t.yaml", "name: t1\nkind: embabel\ntarget: ToolUser\n")))
+        assertTrue(registryRejected(reg2).contains("requests tool groups [math]"), registryRejected(reg2))
+    }
+
+    private fun registryRejected(r: DaemonJobRegistry) = r.rejected().joinToString("\n")
 
     @Test
     @DisplayName("daemon run on a Copilot-backed model is refused unless the job opted in with provider: copilot")
     fun copilotRefused() {
         val stub = ChatModel { ChatResponse(listOf(Generation(AssistantMessage("copilot says hi")))) }
+        assertEquals(0, runs.active())
         CopilotAgent.model = GuardedChatModel("worker", stub, copilot = true, runs = runs, meterRegistry = null)
 
         val refused = assertFailsWith<ExecutionFailedException> { executor.execute(invocation("CopilotAgent"), limits()) }
