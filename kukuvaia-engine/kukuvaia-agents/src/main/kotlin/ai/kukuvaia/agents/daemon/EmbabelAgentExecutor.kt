@@ -9,6 +9,7 @@ import ai.kukuvaia.agent.daemon.exec.JobKind
 import ai.kukuvaia.agent.daemon.exec.JobLimits
 import ai.kukuvaia.agents.config.KukuvaiaModelProvider
 import ai.kukuvaia.provider.service.LlmProviderService
+import com.embabel.agent.core.Agent as AgentDefinition
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.AgentProcessStatusCode
@@ -54,6 +55,7 @@ class EmbabelAgentExecutor(
     private val runs: DaemonEmbabelRuns,
     private val objectMapper: ObjectProvider<ObjectMapper>,
     private val modelProviders: ObjectProvider<ModelProvider>,
+    private val applicationContext: ObjectProvider<org.springframework.context.ApplicationContext>,
 ) : DaemonExecutor {
 
     private val log = LoggerFactory.getLogger(EmbabelAgentExecutor::class.java)
@@ -67,7 +69,7 @@ class EmbabelAgentExecutor(
             return Optional.of("provider '$provider' is not supported for embabel jobs — models come from the agent's " +
                     "roles; only 'provider: copilot' (explicit Copilot opt-in) is accepted")
         }
-        val agent = platform.ifAvailable?.agents()?.firstOrNull { it.name == definition.target() }
+        val agent = knownAgents().firstOrNull { it.name == definition.target() }
             ?: return Optional.of("no Embabel agent named '${definition.target()}' (available: ${agentNames()})")
         val toolGroups = agent.actions.flatMap { it.toolGroups }.map { it.role }.distinct()
         if (toolGroups.isNotEmpty()) {
@@ -76,7 +78,27 @@ class EmbabelAgentExecutor(
         return Optional.empty()
     }
 
-    fun agentNames(): List<String> = platform.ifAvailable?.agents()?.map { it.name }?.sorted() ?: emptyList()
+    fun agentNames(): List<String> = knownAgents().map { it.name }.sorted()
+
+    /**
+     * Agents the platform has deployed — or, while it has not deployed them yet (job definitions are
+     * validated during context startup, before Embabel deploys), the `@Agent` beans read the way Embabel
+     * reads them, so names and declared tool groups are the same.
+     */
+    private fun knownAgents(): List<AgentDefinition> {
+        val deployed = platform.ifAvailable?.agents().orEmpty()
+        if (deployed.isNotEmpty()) return deployed
+        val ctx = applicationContext.ifAvailable ?: return emptyList()
+        val reader = com.embabel.agent.api.annotation.support.AgentMetadataReader()
+        return ctx.getBeansWithAnnotation(com.embabel.agent.api.annotation.Agent::class.java).values.mapNotNull {
+            try {
+                reader.createAgentMetadata(it) as? AgentDefinition
+            } catch (e: RuntimeException) {
+                log.warn("Could not read Embabel agent metadata of {}: {}", it.javaClass.simpleName, e.message)
+                null
+            }
+        }
+    }
 
     /** All models Embabel can use must come from the guarded provider — otherwise refuse (fail closed). */
     private fun unguardedModelProvider(): String? {

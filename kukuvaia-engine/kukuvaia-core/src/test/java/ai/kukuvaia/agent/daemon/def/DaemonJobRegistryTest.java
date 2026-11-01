@@ -101,6 +101,21 @@ class DaemonJobRegistryTest {
     }
 
     @Test
+    @DisplayName("E2E regression: Spring can construct the registry bean (two constructors → one is @Autowired)")
+    void springCanConstructRegistry() {
+        try (var ctx = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            ctx.registerBean(ai.kukuvaia.agent.daemon.DaemonConfig.DaemonProperties.class);
+            ctx.registerBean(ai.kukuvaia.extensions.ExtensionLoader.class,
+                    () -> org.mockito.Mockito.mock(ai.kukuvaia.extensions.ExtensionLoader.class));
+            ctx.registerBean("javaExecutor", DaemonExecutor.class, () -> executor(JobKind.JAVA, "scan"));
+            ctx.registerBean(DaemonJobRegistry.class);
+            ctx.refresh();
+
+            assertThat(ctx.getBean(DaemonJobRegistry.class).all()).isNotNull();
+        }
+    }
+
+    @Test
     @DisplayName("review #8: a replacement that fails validation leaves the existing job active")
     void rejectedReplacementKeepsOriginal() {
         var registry = new DaemonJobRegistry(executors, List.of(

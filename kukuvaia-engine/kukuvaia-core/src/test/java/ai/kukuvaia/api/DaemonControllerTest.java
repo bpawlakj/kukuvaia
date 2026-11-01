@@ -69,7 +69,8 @@ class DaemonControllerTest {
     private MockMvc mvc(boolean devMode, ApiAuthFilter filter) {
         var controller = new DaemonController(registry, runtime, store, budget,
                 new PayloadSanitizer(JsonMapper.builder().build()), properties, devMode);
-        var builder = MockMvcBuilders.standaloneSetup(controller);
+        // The production @RestControllerAdvice — so status codes are asserted as clients see them (E2E regression).
+        var builder = MockMvcBuilders.standaloneSetup(controller).setControllerAdvice(new ai.kukuvaia.security.ErrorSanitizer());
         if (filter != null) builder.addFilters(filter);
         return builder.build();
     }

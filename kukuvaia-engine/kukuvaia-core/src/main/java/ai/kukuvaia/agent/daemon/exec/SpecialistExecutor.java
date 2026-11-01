@@ -46,6 +46,6 @@ public class SpecialistExecutor implements DaemonExecutor {
                 ExecutionContext.DAEMON, invocation.provider(), 0, properties.toolScopeOrNull(),
                 limits.maxToolRounds(), limits.maxTokens());
         return new ExecutionOutcome(run.content(), null, run.promptTokens(), run.completionTokens(),
-                run.usageReported(), invocation.provider() != null ? invocation.provider() : "daemon-default", null);
+                run.usageReported(), invocation.provider() != null ? invocation.provider() : "daemon-default", run.model());
     }
 }

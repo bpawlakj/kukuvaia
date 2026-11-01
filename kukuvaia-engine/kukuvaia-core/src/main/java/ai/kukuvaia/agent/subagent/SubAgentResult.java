@@ -14,7 +14,11 @@ import org.springframework.ai.chat.model.ChatResponse;
  * @param usageReported    {@code false} when the provider returned no usage at all — callers that
  *                         enforce budgets must then fall back to a conservative estimate (fail closed)
  */
-public record SubAgentResult(String content, int promptTokens, int completionTokens, boolean usageReported) {
+public record SubAgentResult(String content, int promptTokens, int completionTokens, boolean usageReported, String model) {
+
+    public SubAgentResult(String content, int promptTokens, int completionTokens, boolean usageReported) {
+        this(content, promptTokens, completionTokens, usageReported, null);
+    }
 
     public int totalTokens() {
         return promptTokens + completionTokens;
@@ -28,11 +32,13 @@ public record SubAgentResult(String content, int promptTokens, int completionTok
                 ? response.getResult().getOutput().getText()
                 : null;
         Usage usage = response.getMetadata() != null ? response.getMetadata().getUsage() : null;
+        String model = response.getMetadata() != null && response.getMetadata().getModel() != null
+                && !response.getMetadata().getModel().isBlank() ? response.getMetadata().getModel() : null;
         if (usage == null || usage instanceof EmptyUsage) {
-            return new SubAgentResult(content, 0, 0, false);
+            return new SubAgentResult(content, 0, 0, false, model);
         }
         int prompt = usage.getPromptTokens() != null ? usage.getPromptTokens() : 0;
         int completion = usage.getCompletionTokens() != null ? usage.getCompletionTokens() : 0;
-        return new SubAgentResult(content, prompt, completion, prompt + completion > 0);
+        return new SubAgentResult(content, prompt, completion, prompt + completion > 0, model);
     }
 }

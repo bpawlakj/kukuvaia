@@ -81,6 +81,24 @@ public class ErrorSanitizer {
         return null;
     }
 
+    /**
+     * Deliberate HTTP errors ({@code ResponseStatusException}: 400/403/404/409 from controllers) keep
+     * their status; only the reason is sanitized. Without this the catch-all below turned them into 500.
+     */
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<Map<String, String>> handleStatus(org.springframework.web.server.ResponseStatusException ex) {
+        int code = ex.getStatusCode().value();
+        if (code >= 500) {
+            log.error("Request failed with {}", code, ex);
+        } else {
+            log.debug("Request rejected with {}: {}", code, ex.getReason());
+        }
+        HttpStatus status = HttpStatus.resolve(code);
+        String error = status != null ? status.name().toLowerCase(java.util.Locale.ROOT) : "error";
+        return ResponseEntity.status(ex.getStatusCode())
+                .body(Map.of("error", error, "message", ex.getReason() == null ? error : sanitize(ex.getReason())));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, String>> handleAll(Exception ex) {
         // Log full error server-side

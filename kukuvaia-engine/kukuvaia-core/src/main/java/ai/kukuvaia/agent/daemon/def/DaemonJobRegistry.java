@@ -44,6 +44,7 @@ public class DaemonJobRegistry {
     private final Map<String, DaemonJobDefinition> byWebhookRoute;
     private final List<String> rejected;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DaemonJobRegistry(List<DaemonExecutor> executors, DaemonProperties properties, ExtensionLoader extensions) {
         this(executors, loadSources(properties.isProjectJobs() ? extensions.getExtensionRoot() : Optional.empty()));
     }

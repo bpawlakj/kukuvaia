@@ -112,7 +112,8 @@ class EmbabelAgentExecutorTest {
     private fun executor(beans: StaticListableBeanFactory) =
         EmbabelAgentExecutor(beans.getBeanProvider(AgentPlatform::class.java), runs,
             beans.getBeanProvider(tools.jackson.databind.ObjectMapper::class.java),
-            beans.getBeanProvider(com.embabel.common.ai.model.ModelProvider::class.java))
+            beans.getBeanProvider(com.embabel.common.ai.model.ModelProvider::class.java),
+            beans.getBeanProvider(org.springframework.context.ApplicationContext::class.java))
 
     private fun usageModel(tokensPerCall: Int): ChatModel = ChatModel {
         ChatResponse(listOf(Generation(AssistantMessage("ok"))),
@@ -229,6 +230,22 @@ class EmbabelAgentExecutorTest {
     }
 
     private fun registryRejected(r: DaemonJobRegistry) = r.rejected().joinToString("\n")
+
+    @Test
+    @DisplayName("E2E regression: jobs validate before Embabel deploys its agents (uses the @Agent beans)")
+    fun validatesBeforeDeployment() {
+        val emptyPlatform = org.mockito.kotlin.mock<AgentPlatform> { on { agents() } doReturn emptyList() }
+        val ctx = org.springframework.context.support.GenericApplicationContext()
+        ctx.registerBean("pingAgent", PingAgent::class.java, java.util.function.Supplier { PingAgent() })
+        ctx.refresh()
+        val early = StaticListableBeanFactory()
+        early.addBean("platform", emptyPlatform)
+        early.addBean("ctx", ctx)
+        val reg = DaemonJobRegistry(listOf(executor(early)), listOf(entry("p.yaml", "name: p2\nkind: embabel\ntarget: PingAgent\n")))
+
+        assertEquals(listOf("p2"), reg.all().map { it.name() }, registryRejected(reg))
+        ctx.close()
+    }
 
     @Test
     @DisplayName("daemon run on a Copilot-backed model is refused unless the job opted in with provider: copilot")

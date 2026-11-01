@@ -66,7 +66,7 @@ class SubAgentFactoryCallTest {
 
     private static ChatResponse answer(String text, int prompt, int completion) {
         return new ChatResponse(List.of(new Generation(new AssistantMessage(text))),
-                ChatResponseMetadata.builder().usage(new DefaultUsage(prompt, completion)).build());
+                ChatResponseMetadata.builder().usage(new DefaultUsage(prompt, completion)).model("stub-model-1").build());
     }
 
     @BeforeEach
@@ -103,6 +103,7 @@ class SubAgentFactoryCallTest {
         assertThat(result.completionTokens()).isEqualTo(30);
         assertThat(result.totalTokens()).isEqualTo(150);
         assertThat(result.usageReported()).isTrue();
+        assertThat(result.model()).isEqualTo("stub-model-1"); // E2E: audit rows record the answering model
     }
 
     @Test
